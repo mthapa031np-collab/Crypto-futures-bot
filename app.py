@@ -207,8 +207,7 @@ with col_depth:
 
         st.caption("🔴 Sell Orders (Asks)")
         st.dataframe(
-            asks_df.style.format({"Price ($)": "${:,.2f}", "Size": "{:.4f}"})
-                         .background_gradient(subset=["Size"], cmap="Reds"),
+            asks_df.style.format({"Price ($)": "${:,.2f}", "Size": "{:.4f}"}),
             use_container_width=True, height=170, hide_index=True
         )
 
@@ -217,8 +216,7 @@ with col_depth:
 
         st.caption("🟢 Buy Orders (Bids)")
         st.dataframe(
-            bids_df.style.format({"Price ($)": "${:,.2f}", "Size": "{:.4f}"})
-                         .background_gradient(subset=["Size"], cmap="Greens"),
+            bids_df.style.format({"Price ($)": "${:,.2f}", "Size": "{:.4f}"}),
             use_container_width=True, height=170, hide_index=True
         )
     else:
