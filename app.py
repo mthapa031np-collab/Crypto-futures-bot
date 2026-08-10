@@ -6,8 +6,8 @@ from datetime import datetime
 
 # ============================================================
 # PRO TRADING TERMINAL
-# PHASE 2 - LIVE MARKET DATA
-# Paper / Demo Trading Only
+# Live Market Data + Futures + Paper Trading
+# REAL TRADING DISABLED
 # ============================================================
 
 st.set_page_config(
@@ -17,14 +17,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ============================================================
-# CONFIG
-# ============================================================
-
 BYBIT_API = "https://api.bybit.com"
 BINANCE_API = "https://api.binance.com"
 
-CRYPTO_SYMBOLS = {
+SYMBOLS = {
     "BTC/USDT": "BTCUSDT",
     "ETH/USDT": "ETHUSDT",
     "SOL/USDT": "SOLUSDT",
@@ -36,7 +32,7 @@ CRYPTO_SYMBOLS = {
 }
 
 # ============================================================
-# PROFESSIONAL DARK UI
+# PROFESSIONAL UI
 # ============================================================
 
 st.markdown(
@@ -57,27 +53,28 @@ st.markdown(
     color: #eaecef;
 }
 
+.block-container {
+    padding-top: 1.5rem;
+    padding-bottom: 2rem;
+}
+
 .main-title {
     font-size: 30px;
-    font-weight: 750;
-    color: #f0f2f4;
+    font-weight: 800;
 }
 
 .subtitle {
     color: #848e9c;
     font-size: 14px;
+    margin-top: 5px;
 }
 
 .header-card {
-    background: linear-gradient(
-        135deg,
-        #11161d,
-        #181e27
-    );
+    background: linear-gradient(135deg, #11161d, #181e27);
     border: 1px solid #2b3139;
     border-radius: 14px;
     padding: 22px;
-    margin-bottom: 18px;
+    margin-bottom: 20px;
 }
 
 .dashboard-card {
@@ -85,7 +82,7 @@ st.markdown(
     border: 1px solid #2b3139;
     border-radius: 12px;
     padding: 17px;
-    min-height: 110px;
+    min-height: 115px;
 }
 
 .card-label {
@@ -117,7 +114,7 @@ st.markdown(
     color: #f0f2f4;
     font-size: 20px;
     font-weight: 700;
-    margin-top: 18px;
+    margin-top: 20px;
     margin-bottom: 12px;
 }
 
@@ -126,27 +123,25 @@ st.markdown(
     border: 1px solid #2b3139;
     border-radius: 12px;
     padding: 15px;
-    min-height: 125px;
+    min-height: 135px;
 }
 
 .market-name {
-    color: #eaecef;
-    font-weight: 700;
     font-size: 15px;
+    font-weight: 700;
 }
 
 .market-price {
-    color: #f0f2f4;
     font-size: 22px;
     font-weight: 750;
-    margin-top: 9px;
+    margin-top: 8px;
 }
 
 .live-badge {
     background: #123b2e;
     color: #0ecb81;
     border-radius: 5px;
-    padding: 3px 7px;
+    padding: 4px 7px;
     font-size: 10px;
     font-weight: 700;
 }
@@ -155,7 +150,7 @@ st.markdown(
     background: #3a2025;
     color: #f6465d;
     border-radius: 5px;
-    padding: 3px 7px;
+    padding: 4px 7px;
     font-size: 10px;
     font-weight: 700;
 }
@@ -172,38 +167,40 @@ st.markdown(
     font-size: 12px;
 }
 
+.status-online {
+    color: #0ecb81;
+    font-weight: 700;
+}
+
+.status-warning {
+    color: #f0b90e;
+    font-weight: 700;
+}
+
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 # ============================================================
-# MARKET DATA
+# LIVE TICKER
 # ============================================================
 
 def get_ticker(symbol):
-    """
-    Get live market data.
-
-    Primary:
-        Bybit Linear Futures
-
-    Fallback:
-        Binance Spot
-    """
 
     clean_symbol = symbol.replace("/", "").upper()
 
     headers = {
-        "User-Agent": "Pro-Trading-Terminal/2.0",
+        "User-Agent": "Pro-Trading-Terminal/3.0",
         "Accept": "application/json",
     }
 
     # --------------------------------------------------------
-    # BYBIT
+    # BYBIT FUTURES
     # --------------------------------------------------------
 
     try:
+
         response = requests.get(
             f"{BYBIT_API}/v5/market/tickers",
             params={
@@ -220,41 +217,40 @@ def get_ticker(symbol):
 
             if data.get("retCode") == 0:
 
-                ticker_list = (
-                    data.get("result", {})
-                    .get("list", [])
+                items = data.get(
+                    "result", {}
+                ).get(
+                    "list", []
                 )
 
-                if ticker_list:
+                if items:
 
-                    ticker = ticker_list[0]
+                    ticker = items[0]
 
                     return {
                         "price": float(
-                            ticker["lastPrice"]
+                            ticker.get(
+                                "lastPrice", 0
+                            )
                         ),
                         "change": float(
                             ticker.get(
-                                "price24hPcnt",
-                                0
+                                "price24hPcnt", 0
                             )
                         ) * 100,
                         "volume": float(
                             ticker.get(
-                                "turnover24h",
-                                0
+                                "turnover24h", 0
                             )
                         ),
                         "high": float(
                             ticker.get(
-                                "highPrice24h",
-                                0
+                                "highPrice24h", 0
                             )
                         ),
                         "low": float(
                             ticker.get(
-                                "lowPrice24h",
-                                0
+                                "lowPrice24h", 0
                             )
                         ),
                         "source": "BYBIT",
@@ -272,7 +268,7 @@ def get_ticker(symbol):
         response = requests.get(
             f"{BINANCE_API}/api/v3/ticker/24hr",
             params={
-                "symbol": clean_symbol,
+                "symbol": clean_symbol
             },
             headers=headers,
             timeout=8,
@@ -314,8 +310,7 @@ def get_ticker(symbol):
 def get_orderbook(symbol):
 
     clean_symbol = symbol.replace(
-        "/",
-        ""
+        "/", ""
     ).upper()
 
     try:
@@ -345,7 +340,6 @@ def get_orderbook(symbol):
 
         bids = result.get(
             "b",
-",
             []
         )
 
@@ -364,92 +358,72 @@ def get_orderbook(symbol):
 
 
 # ============================================================
-# TRADINGVIEW CHART
+# TRADINGVIEW
 # ============================================================
 
-def create_tradingview_widget(
+def tradingview_chart(
     symbol,
     interval="15",
-    height=620,
+    height=600,
 ):
 
     tv_symbol = (
         f"BINANCE:{symbol}USDT"
     )
 
-    chart_html = f"""
+    html = f"""
     <div
+        id="tradingview_chart"
         style="
-        height:{height}px;
-        width:100%;
-        "
-    >
-
-        <div
-            id="tradingview_chart"
-            style="
-            height:100%;
+            height:{height}px;
             width:100%;
-            "
-        >
-        </div>
+        "
+    ></div>
 
-        <script
-            src="https://s3.tradingview.com/tv.js">
-        </script>
+    <script
+        src="https://s3.tradingview.com/tv.js">
+    </script>
 
-        <script>
+    <script>
 
-        new TradingView.widget({{
+    new TradingView.widget({{
 
-            "autosize": true,
+        "autosize": true,
 
-            "symbol":
-                "{tv_symbol}",
+        "symbol": "{tv_symbol}",
 
-            "interval":
-                "{interval}",
+        "interval": "{interval}",
 
-            "timezone":
-                "Etc/UTC",
+        "timezone": "Etc/UTC",
 
-            "theme":
-                "dark",
+        "theme": "dark",
 
-            "style":
-                "1",
+        "style": "1",
 
-            "locale":
-                "en",
+        "locale": "en",
 
-            "toolbar_bg":
-                "#11161d",
+        "toolbar_bg": "#11161d",
 
-            "enable_publishing":
-                false,
+        "enable_publishing": false,
 
-            "hide_side_toolbar":
-                false,
+        "hide_side_toolbar": false,
 
-            "allow_symbol_change":
-                true,
+        "allow_symbol_change": true,
 
-            "studies": [
-                "RSI@tv-basicstudies",
-                "MASimple@tv-basicstudies"
-            ],
+        "studies": [
+            "RSI@tv-basicstudies",
+            "MASimple@tv-basicstudies"
+        ],
 
-            "container_id":
-                "tradingview_chart"
+        "container_id":
+            "tradingview_chart"
 
-        }});
+    }});
 
-        </script>
-
-    </div>
+    </script>
     """
 
-    return chart_html
+    return html
 
 
 # ============================================================
@@ -459,9 +433,8 @@ def create_tradingview_widget(
 st.sidebar.markdown(
     """
     <div style="
-        font-size:23px;
-        font-weight:750;
-        margin-bottom:3px;
+        font-size:24px;
+        font-weight:800;
     ">
         📊 PRO TERMINAL
     </div>
@@ -469,7 +442,8 @@ st.sidebar.markdown(
     <div style="
         color:#848e9c;
         font-size:12px;
-        margin-bottom:18px;
+        margin-top:4px;
+        margin-bottom:20px;
     ">
         Advanced Trading Intelligence
     </div>
@@ -494,20 +468,32 @@ st.sidebar.markdown(
     "### ⚙️ System Status"
 )
 
-st.sidebar.success(
-    "Market Data: ONLINE"
+st.sidebar.markdown(
+    '<div class="status-online">'
+    '🟢 Market Data: ONLINE'
+    '</div>',
+    unsafe_allow_html=True,
 )
 
-st.sidebar.success(
-    "Chart Engine: ONLINE"
+st.sidebar.markdown(
+    '<div class="status-online">'
+    '🟢 Chart Engine: ONLINE'
+    '</div>',
+    unsafe_allow_html=True,
 )
 
-st.sidebar.info(
-    "AI Engine: PHASE 2"
+st.sidebar.markdown(
+    '<div class="status-warning">'
+    '🟡 AI Engine: PHASE 2'
+    '</div>',
+    unsafe_allow_html=True,
 )
 
-st.sidebar.warning(
-    "Real Trading: DISABLED"
+st.sidebar.markdown(
+    '<div class="status-warning">'
+    '🟡 Real Trading: DISABLED'
+    '</div>',
+    unsafe_allow_html=True,
 )
 
 st.sidebar.markdown("---")
@@ -517,7 +503,7 @@ st.sidebar.caption(
 )
 
 st.sidebar.caption(
-    "Phase 2 • Live Market Data"
+    "Live Market Data • Paper Trading"
 )
 
 
@@ -552,7 +538,7 @@ if page == "🏠 Dashboard":
         st.rerun()
 
     # --------------------------------------------------------
-    # PORTFOLIO CARDS
+    # SUMMARY
     # --------------------------------------------------------
 
     c1, c2, c3, c4 = st.columns(4)
@@ -660,22 +646,24 @@ if page == "🏠 Dashboard":
         unsafe_allow_html=True,
     )
 
-    market_columns = st.columns(4)
+    market_pairs = [
+        "BTC/USDT",
+        "ETH/USDT",
+        "SOL/USDT",
+        "XRP/USDT",
+    ]
 
-    for index, pair in enumerate(
-        [
-            "BTC/USDT",
-            "ETH/USDT",
-            "SOL/USDT",
-            "XRP/USDT",
-        ]
+    cols = st.columns(4)
+
+    for i, pair in enumerate(
+        market_pairs
     ):
 
         data = get_ticker(
-            CRYPTO_SYMBOLS[pair]
+            SYMBOLS[pair]
         )
 
-        with market_columns[index]:
+        with cols[i]:
 
             if data:
 
@@ -683,13 +671,10 @@ if page == "🏠 Dashboard":
                 change = data["change"]
 
                 if change >= 0:
-
-                    change_class = "green"
+                    movement = "green"
                     arrow = "▲"
-
                 else:
-
-                    change_class = "red"
+                    movement = "red"
                     arrow = "▼"
 
                 st.markdown(
@@ -704,10 +689,9 @@ if page == "🏠 Dashboard":
                             ${price:,.4f}
                         </div>
 
-                        <div class="{change_class}">
+                        <div class="{movement}">
                             {arrow}
-                            {change:.2f}%
-                            24H
+                            {change:.2f}% 24H
                         </div>
 
                         <br>
@@ -747,7 +731,7 @@ if page == "🏠 Dashboard":
                 )
 
     # --------------------------------------------------------
-    # CHART + INTELLIGENCE
+    # CHART
     # --------------------------------------------------------
 
     st.markdown(
@@ -757,7 +741,7 @@ if page == "🏠 Dashboard":
         unsafe_allow_html=True,
     )
 
-    chart_col, side_col = st.columns(
+    chart_col, info_col = st.columns(
         [2.6, 1]
     )
 
@@ -765,13 +749,7 @@ if page == "🏠 Dashboard":
 
         selected_pair = st.selectbox(
             "Chart Market",
-            [
-                "BTC/USDT",
-                "ETH/USDT",
-                "SOL/USDT",
-                "XRP/USDT",
-                "BNB/USDT",
-            ],
+            list(SYMBOLS.keys()),
         )
 
         timeframe = st.selectbox(
@@ -789,29 +767,24 @@ if page == "🏠 Dashboard":
             index=2,
         )
 
-        clean_symbol = (
-            selected_pair
-            .replace(
-                "/USDT",
-                ""
-            )
+        clean = selected_pair.replace(
+            "/USDT",
+            ""
         )
 
         components.html(
-            create_tradingview_widget(
-                clean_symbol,
+            tradingview_chart(
+                clean,
                 timeframe,
-                620,
+                600,
             ),
-            height=620,
+            height=600,
         )
 
-    with side_col:
+    with info_col:
 
         current = get_ticker(
-            CRYPTO_SYMBOLS[
-                selected_pair
-            ]
+            SYMBOLS[selected_pair]
         )
 
         st.markdown(
@@ -854,11 +827,9 @@ if page == "🏠 Dashboard":
                     Moderate
                 </p>
 
-                <br>
-
                 <span class="small-text">
-                    AI engine will be added
-                    in Phase 3.
+                    AI analysis will be added
+                    in the next phase.
                 </span>
 
             </div>
@@ -884,7 +855,7 @@ if page == "🏠 Dashboard":
                     <br><br>
 
                     <span class="small-text">
-                        24H High
+                        24H HIGH
                     </span>
 
                     <br>
@@ -894,7 +865,7 @@ if page == "🏠 Dashboard":
                     <br><br>
 
                     <span class="small-text">
-                        24H Low
+                        24H LOW
                     </span>
 
                     <br>
@@ -904,7 +875,7 @@ if page == "🏠 Dashboard":
                     <br><br>
 
                     <span class="small-text">
-                        24H Volume
+                        24H VOLUME
                     </span>
 
                     <br>
@@ -917,12 +888,12 @@ if page == "🏠 Dashboard":
             )
 
     # --------------------------------------------------------
-    # NEWS PLACEHOLDER
+    # NEWS
     # --------------------------------------------------------
 
     st.markdown(
         '<div class="section-title">'
-        '📰 Market News'
+        '📰 Market Intelligence'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -930,18 +901,21 @@ if page == "🏠 Dashboard":
     n1, n2, n3 = st.columns(3)
 
     n1.info(
-        "Crypto News Engine\n\n"
-        "Coming in Phase 3"
+        "📰 Crypto News Engine\n\n"
+        "News integration will be added "
+        "in the next phase."
     )
 
     n2.info(
-        "Fed / CPI / FOMC\n\n"
-        "Economic calendar coming soon"
+        "🏦 Fed / CPI / FOMC\n\n"
+        "Economic calendar integration "
+        "will be added next."
     )
 
     n3.info(
-        "AI Sentiment\n\n"
-        "Coming in Phase 3"
+        "🤖 AI Sentiment\n\n"
+        "AI market sentiment engine "
+        "will be added next."
     )
 
 
@@ -976,7 +950,7 @@ elif page == "📈 Markets":
 
     rows = []
 
-    for pair, symbol in CRYPTO_SYMBOLS.items():
+    for pair, symbol in SYMBOLS.items():
 
         data = get_ticker(symbol)
 
@@ -1007,7 +981,7 @@ elif page == "📈 Markets":
     else:
 
         st.error(
-            "Unable to retrieve market data."
+            "Market data unavailable."
         )
 
     st.markdown(
@@ -1019,11 +993,11 @@ elif page == "📈 Markets":
 
     pair = st.selectbox(
         "Select Pair",
-        list(CRYPTO_SYMBOLS.keys()),
+        list(SYMBOLS.keys()),
     )
 
     timeframe = st.selectbox(
-        "Timeframe",
+        "Chart Timeframe",
         [
             "1",
             "5",
@@ -1043,7 +1017,7 @@ elif page == "📈 Markets":
     )
 
     components.html(
-        create_tradingview_widget(
+        tradingview_chart(
             clean,
             timeframe,
             650,
@@ -1067,7 +1041,7 @@ elif page == "⚡ Futures":
             </div>
 
             <div class="subtitle">
-                Professional futures interface
+                Professional Futures Interface
                 • Paper Trading Mode
             </div>
 
@@ -1077,8 +1051,12 @@ elif page == "⚡ Futures":
     )
 
     left, center, right = st.columns(
-        [1, 2.4, 1]
+        [1, 2.5, 1]
     )
+
+    # --------------------------------------------------------
+    # ORDER PANEL
+    # --------------------------------------------------------
 
     with left:
 
@@ -1144,6 +1122,11 @@ elif page == "⚡ Futures":
             step=0.1,
         )
 
+        risk_reward = (
+            take_profit /
+            stop_loss
+        )
+
         st.markdown("---")
 
         st.metric(
@@ -1156,11 +1139,6 @@ elif page == "⚡ Futures":
             f"{stop_loss:.1f}%"
         )
 
-        risk_reward = (
-            take_profit /
-            stop_loss
-        )
-
         st.metric(
             "Risk / Reward",
             f"1:{risk_reward:.2f}"
@@ -1168,15 +1146,23 @@ elif page == "⚡ Futures":
 
         st.warning(
             "Paper Trading only. "
-            "No real exchange order "
-            "will be sent."
+            "Real exchange orders are disabled."
         )
 
-        st.button(
+        if st.button(
             "🚀 PLACE PAPER ORDER",
             use_container_width=True,
             type="primary",
-        )
+        ):
+
+            st.success(
+                f"Paper {side} order created "
+                f"for {pair}."
+            )
+
+    # --------------------------------------------------------
+    # CHART
+    # --------------------------------------------------------
 
     with center:
 
@@ -1200,13 +1186,17 @@ elif page == "⚡ Futures":
         )
 
         components.html(
-            create_tradingview_widget(
+            tradingview_chart(
                 clean,
                 timeframe,
                 620,
             ),
             height=620,
         )
+
+    # --------------------------------------------------------
+    # ORDER BOOK
+    # --------------------------------------------------------
 
     with right:
 
@@ -1223,57 +1213,45 @@ elif page == "⚡ Futures":
 
         if book:
 
-            ask_rows = []
+            asks = []
 
-            for ask in book["asks"]:
+            for item in book["asks"]:
 
-                ask_rows.append(
+                asks.append(
                     {
-                        "Ask Price": float(
-                            ask[0]
-                        ),
-                        "Size": float(
-                            ask[1]
-                        ),
+                        "Ask": float(item[0]),
+                        "Size": float(item[1]),
                     }
                 )
 
-            bid_rows = []
+            bids = []
 
-            for bid in book["bids"]:
+            for item in book["bids"]:
 
-                bid_rows.append(
+                bids.append(
                     {
-                        "Bid Price": float(
-                            bid[0]
-                        ),
-                        "Size": float(
-                            bid[1]
-                        ),
+                        "Bid": float(item[0]),
+                        "Size": float(item[1]),
                     }
                 )
 
-            if ask_rows:
+            st.caption("ASKS")
+
+            if asks:
 
                 st.dataframe(
-                    pd.DataFrame(
-                        ask_rows
-                    ),
+                    pd.DataFrame(asks),
                     use_container_width=True,
                     hide_index=True,
                     height=220,
                 )
 
-            st.markdown(
-                "---"
-            )
+            st.caption("BIDS")
 
-            if bid_rows:
+            if bids:
 
                 st.dataframe(
-                    pd.DataFrame(
-                        bid_rows
-                    ),
+                    pd.DataFrame(bids),
                     use_container_width=True,
                     hide_index=True,
                     height=220,
@@ -1485,9 +1463,9 @@ elif page == "🧪 Paper Trading":
     )
 
     st.info(
-        "Next upgrades: Strategy Engine • "
-        "Backtesting • AI Signals • "
-        "Risk Management"
+        "Next upgrades: Backtesting • "
+        "Strategy Engine • AI Signals • "
+        "Risk Management • News"
     )
 
 
@@ -1499,6 +1477,7 @@ st.markdown("---")
 
 st.caption(
     "Pro Trading Terminal • "
-    "Phase 2 • Live Market Data • "
-    f"Updated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    "Live Market Data • "
+    "Paper Trading • "
+    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 )
