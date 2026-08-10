@@ -69,28 +69,47 @@ div.stButton > button[key="btn_sell"] {
 """, unsafe_allow_html=True)
 
 # 3. Fast Binance Ticker Fetcher with Fallback
+# NOTE: api.binance.com often returns HTTP 451 when called from cloud/datacenter
+# IPs (Render, AWS, Heroku, etc). We try multiple base URLs in order until one works.
+BINANCE_HOSTS = [
+    "https://data-api.binance.vision",  # public market-data mirror, cloud-friendly
+    "https://api.binance.com",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+]
+
 @st.cache_data(ttl=2)
 def get_live_ticker(symbol):
-    try:
-        url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
-        res = requests.get(url, timeout=2.5)
-        if res.status_code == 200:
-            return res.json()
-    except Exception:
-        pass
+    last_error = None
+    for host in BINANCE_HOSTS:
+        try:
+            url = f"{host}/api/v3/ticker/24hr?symbol={symbol}"
+            res = requests.get(url, timeout=3, headers={"User-Agent": "Mozilla/5.0"})
+            if res.status_code == 200:
+                return res.json()
+            last_error = f"{host} -> HTTP {res.status_code}"
+        except Exception as e:
+            last_error = f"{host} -> {e}"
+            continue
+    st.session_state["last_ticker_error"] = last_error
     return None
 
 # 3b. REAL Order Book Depth Fetcher (NEW - replaces fake data)
 @st.cache_data(ttl=1)
 def get_order_book(symbol, limit=10):
-    """Fetch real live order book (bids/asks) from Binance public API."""
-    try:
-        url = f"https://api.binance.com/api/v3/depth?symbol={symbol}&limit={limit}"
-        res = requests.get(url, timeout=2.5)
-        if res.status_code == 200:
-            return res.json()
-    except Exception:
-        pass
+    """Fetch real live order book (bids/asks) from Binance public API, with fallback hosts."""
+    last_error = None
+    for host in BINANCE_HOSTS:
+        try:
+            url = f"{host}/api/v3/depth?symbol={symbol}&limit={limit}"
+            res = requests.get(url, timeout=3, headers={"User-Agent": "Mozilla/5.0"})
+            if res.status_code == 200:
+                return res.json()
+            last_error = f"{host} -> HTTP {res.status_code}"
+        except Exception as e:
+            last_error = f"{host} -> {e}"
+            continue
+    st.session_state["last_ob_error"] = last_error
     return None
 
 # Top Major Crypto List
@@ -126,7 +145,10 @@ if ticker:
 else:
     last_price = 0.0
     with c_p:
-        st.markdown("<div class='stat-label'>Market Price</div><div class='stat-value'>Connecting...</div>", unsafe_allow_html=True)
+        err = st.session_state.get("last_ticker_error", "")
+        st.markdown(f"<div class='stat-label'>Market Price</div><div class='stat-value val-red'>Connecting... {'⚠️' if err else ''}</div>", unsafe_allow_html=True)
+        if err:
+            st.caption(f"⚠️ {err}")
 
 with c_bal:
     st.markdown("<div class='stat-label' style='text-align:right;'>Account Balance</div><div class='stat-value val-green' style='text-align:right;'>$27,594.00 USDT</div>", unsafe_allow_html=True)
@@ -201,6 +223,9 @@ with col_depth:
         )
     else:
         st.info("Loading Order Book...")
+        ob_err = st.session_state.get("last_ob_error", "")
+        if ob_err:
+            st.caption(f"⚠️ {ob_err}")
 
 # C. DYNAMIC EXECUTION ENGINE
 with col_exec:
