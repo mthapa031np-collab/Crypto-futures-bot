@@ -112,6 +112,121 @@ def get_order_book(symbol, limit=10):
     st.session_state["last_ob_error"] = last_error
     return None
 
+# 3c. Kline (candlestick) fetcher for technical analysis
+@st.cache_data(ttl=15)
+def get_klines(symbol, interval="15m", limit=100):
+    """Fetch recent candlestick data used to compute RSI/EMA signals."""
+    for host in BINANCE_HOSTS:
+        try:
+            url = f"{host}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+            res = requests.get(url, timeout=3, headers={"User-Agent": "Mozilla/5.0"})
+            if res.status_code == 200:
+                raw = res.json()
+                closes = [float(c[4]) for c in raw]
+                highs = [float(c[2]) for c in raw]
+                lows = [float(c[3]) for c in raw]
+                return closes, highs, lows
+        except Exception:
+            continue
+    return None, None, None
+
+
+def compute_rsi(closes, period=14):
+    """Standard RSI calculation."""
+    if len(closes) < period + 1:
+        return None
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    gains = [d if d > 0 else 0 for d in deltas]
+    losses = [-d if d < 0 else 0 for d in deltas]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def compute_ema(closes, period):
+    """Standard EMA calculation."""
+    if len(closes) < period:
+        return None
+    k = 2 / (period + 1)
+    ema = sum(closes[:period]) / period
+    for price in closes[period:]:
+        ema = price * k + ema * (1 - k)
+    return ema
+
+
+def compute_atr(highs, lows, closes, period=14):
+    """Average True Range - used to size TP/SL distance based on volatility."""
+    if len(closes) < period + 1:
+        return None
+    trs = []
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        trs.append(tr)
+    return sum(trs[-period:]) / period
+
+
+def get_ai_signal(symbol, last_price):
+    """
+    Combine RSI(14) + EMA(9/21) crossover into a simple directional signal,
+    and use ATR(14) to size Take Profit / Stop Loss distances.
+    This is a rule-based technical signal generator for the demo terminal -
+    NOT financial advice and not guaranteed to be profitable.
+    """
+    closes, highs, lows = get_klines(symbol, interval="15m", limit=100)
+    if not closes or len(closes) < 25:
+        return None
+
+    rsi = compute_rsi(closes, 14)
+    ema_fast = compute_ema(closes, 9)
+    ema_slow = compute_ema(closes, 21)
+    atr = compute_atr(highs, lows, closes, 14)
+
+    if rsi is None or ema_fast is None or ema_slow is None or atr is None:
+        return None
+
+    # Decide direction from trend (EMA crossover) + momentum (RSI)
+    if ema_fast > ema_slow and rsi < 70:
+        direction = "LONG"
+        confidence = "High" if rsi < 50 else "Medium"
+    elif ema_fast < ema_slow and rsi > 30:
+        direction = "SHORT"
+        confidence = "High" if rsi > 50 else "Medium"
+    else:
+        direction = "NEUTRAL"
+        confidence = "Low"
+
+    # Size TP/SL off ATR (volatility-based, ~1.5x ATR for SL, ~2.5x ATR for TP -> positive risk/reward)
+    if direction == "LONG":
+        tp = last_price + (atr * 2.5)
+        sl = last_price - (atr * 1.5)
+    elif direction == "SHORT":
+        tp = last_price - (atr * 2.5)
+        sl = last_price + (atr * 1.5)
+    else:
+        tp = last_price + (atr * 2.5)
+        sl = last_price - (atr * 1.5)
+
+    return {
+        "direction": direction,
+        "confidence": confidence,
+        "rsi": rsi,
+        "ema_fast": ema_fast,
+        "ema_slow": ema_slow,
+        "atr": atr,
+        "tp": round(tp, 4),
+        "sl": round(sl, 4),
+    }
+
 # Top Major Crypto List
 TOP_SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
@@ -234,14 +349,31 @@ with col_exec:
     margin_mode = st.selectbox("Margin / Leverage", ["Isolated 20x", "Cross 50x", "Cross 100x"])
 
     # Dynamic Fields based on Selection
+    ai_signal = None
     if mode == "Limit":
         order_price = st.number_input("Order Price ($)", value=float(last_price) if last_price > 0 else 100.0, step=0.1)
     elif mode == "Market":
         st.info("⚡ Execution Price: Instant Best Market Fill")
         order_price = last_price
     else:  # Pro AI Mode
-        st.success("🤖 AI Automation Active: Auto Entry, TP & SL based on Strategy")
         order_price = last_price
+        if last_price > 0:
+            ai_signal = get_ai_signal(selected_pair, last_price)
+
+        if ai_signal:
+            dir_color = "val-green" if ai_signal["direction"] == "LONG" else ("val-red" if ai_signal["direction"] == "SHORT" else "")
+            dir_icon = "🟢" if ai_signal["direction"] == "LONG" else ("🔴" if ai_signal["direction"] == "SHORT" else "⚪")
+            st.markdown(
+                f"<div style='background:#131824;border-radius:6px;padding:10px;margin-bottom:6px;'>"
+                f"<div class='stat-label'>AI Signal (RSI + EMA 9/21)</div>"
+                f"<div class='stat-value {dir_color}' style='font-size:16px;'>{dir_icon} {ai_signal['direction']} · {ai_signal['confidence']} confidence</div>"
+                f"<div class='stat-label' style='margin-top:4px;'>RSI(14): {ai_signal['rsi']:.1f} · EMA9: {ai_signal['ema_fast']:.4f} · EMA21: {ai_signal['ema_slow']:.4f}</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+            st.caption("🤖 Rule-based technical signal for this demo terminal — not financial advice, not guaranteed.")
+        else:
+            st.info("🤖 Calculating AI signal from live market data...")
 
     amount_usdt = st.number_input("Amount (USDT)", min_value=10.0, value=100.0, step=10.0)
 
@@ -249,12 +381,17 @@ with col_exec:
     show_tpsl = st.checkbox("Take Profit / Stop Loss", value=True if mode == "Pro AI" else False)
     if show_tpsl:
         col_tp, col_sl = st.columns(2)
-        with col_tp:
+        if mode == "Pro AI" and ai_signal:
+            # Auto-filled by the AI signal engine (ATR-based), still editable by the user
+            default_tp = ai_signal["tp"]
+            default_sl = ai_signal["sl"]
+        else:
             default_tp = round(last_price * 1.02, 2) if last_price > 0 else 0.0
-            st.number_input("TP Price ($)", value=default_tp, step=0.1)
-        with col_sl:
             default_sl = round(last_price * 0.98, 2) if last_price > 0 else 0.0
-            st.number_input("SL Price ($)", value=default_sl, step=0.1)
+        with col_tp:
+            st.number_input("TP Price ($)", value=default_tp, step=0.1, key="tp_price")
+        with col_sl:
+            st.number_input("SL Price ($)", value=default_sl, step=0.1, key="sl_price")
 
     st.markdown("<br>", unsafe_allow_html=True)
     btn_l = st.button("BUY / LONG", key="btn_buy")
@@ -287,4 +424,23 @@ with tab_pos:
         st.info("No active open positions.")
 
 with tab_logs:
-    st.code(f"System Status: ONLINE\nPair: {selected_pair}\nMarket Feed: Active\nAI Risk Engine: Enabled (Max 2% Risk per trade)", language="text")
+    if st.session_state.get("order_mode") == "Pro AI" and last_price > 0:
+        sig = get_ai_signal(selected_pair, last_price)
+        if sig:
+            st.code(
+                f"System Status: ONLINE\n"
+                f"Pair: {selected_pair}\n"
+                f"Market Feed: Active\n"
+                f"AI Risk Engine: Enabled (Max 2% Risk per trade)\n"
+                f"--- Pro AI Signal ---\n"
+                f"Direction: {sig['direction']}  (Confidence: {sig['confidence']})\n"
+                f"RSI(14): {sig['rsi']:.2f}\n"
+                f"EMA9: {sig['ema_fast']:.4f}  |  EMA21: {sig['ema_slow']:.4f}\n"
+                f"ATR(14): {sig['atr']:.4f}\n"
+                f"Auto TP: ${sig['tp']:,.4f}  |  Auto SL: ${sig['sl']:,.4f}",
+                language="text"
+            )
+        else:
+            st.code(f"System Status: ONLINE\nPair: {selected_pair}\nMarket Feed: Active\nAI Risk Engine: Enabled (Max 2% Risk per trade)\nCalculating signal...", language="text")
+    else:
+        st.code(f"System Status: ONLINE\nPair: {selected_pair}\nMarket Feed: Active\nAI Risk Engine: Enabled (Max 2% Risk per trade)", language="text")
