@@ -1,174 +1,455 @@
 import streamlit as st
-import pandas as pd
-import requests
 import streamlit.components.v1 as components
 
-# 1. Page Configuration
+# Page Layout Configuration
 st.set_page_config(
-    page_title="Pro AI Trading Terminal",
+    page_title="PRO TRADING TERMINAL",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
-# 2. Custom CSS for Halaska Dark Theme Layout
+# Hide Streamlit Default UI Elements (Header, Footer, Padding)
 st.markdown("""
 <style>
-    /* Dark Theme Background */
+    /* Remove padding & Streamlit branding */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .block-container {
+        padding-top: 0rem !important;
+        padding-bottom: 0rem !important;
+        padding-left: 0rem !important;
+        padding-right: 0rem !important;
+        max-width: 100% !important;
+    }
     .stApp {
-        background-color: #0b0e14;
-        color: #d1d4dc;
-    }
-    
-    /* Top Bar Metric Cards */
-    .metric-card {
-        background-color: #151924;
-        border: 1px solid #2a2e39;
-        border-radius: 6px;
-        padding: 10px 15px;
-        text-align: center;
-    }
-    .metric-title { font-size: 11px; color: #787b86; text-transform: uppercase; }
-    .metric-value-green { font-size: 16px; font-weight: bold; color: #0ecb81; }
-    .metric-value-red { font-size: 16px; font-weight: bold; color: #f6465d; }
-    .metric-value-normal { font-size: 16px; font-weight: bold; color: #eaebd7; }
-
-    /* Custom Order Book styling */
-    .order-book-title {
-        font-size: 14px;
-        font-weight: 600;
-        margin-bottom: 8px;
-        color: #848e9c;
-    }
-
-    /* Primary Trading Buttons */
-    div.stButton > button[data-testid="baseButton-secondary"] {
-        background-color: #0ecb81 !important;
-        color: #ffffff !important;
-        font-weight: bold;
-        border: none;
-        width: 100%;
-        height: 45px;
+        background-color: #080a0f;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# 3. Market Data Fetcher (Binance Public API Fallback for Render)
-@st.cache_data(ttl=5)
-def fetch_market_ticker(symbol_pair="BTCUSDT"):
-    try:
-        url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol_pair}"
-        res = requests.get(url, timeout=4)
-        if res.status_code == 200:
-            return res.json()
-    except Exception:
-        pass
-    return None
+# FULL CUSTOM HTML/CSS/JS ULTRADARK TERMINAL ENGINE (Halaska Studio Design)
+terminal_html = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <script src="https://s3.tradingview.com/tv.js"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            -webkit-font-smoothing: antialiased;
+        }
 
-# --- SIDEBAR CONTROLS ---
-st.sidebar.title("⚡ AI TERMINAL")
-selected_pair = st.sidebar.selectbox("Select Crypto Pair", ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"], index=0)
-timeframe = st.sidebar.selectbox("Timeframe", ["1m", "5m", "15m", "1h", "4h", "1d"], index=2)
+        body {
+            background-color: #080a0d;
+            color: #9097a6;
+            overflow: hidden;
+            height: 100vh;
+        }
 
-tf_map = {"1m": "1", "5m": "5", "15m": "15", "1h": "60", "4h": "240", "1d": "D"}
+        /* TOP NAVBAR */
+        .top-nav {
+            height: 48px;
+            background-color: #0d1117;
+            border-bottom: 1px solid #1c212d;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 16px;
+            font-size: 12px;
+        }
 
-# Fetch Ticker Data
-ticker_data = fetch_market_ticker(selected_pair)
+        .nav-left, .nav-center, .nav-right {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
 
-# --- TOP STATS BAR ---
-if ticker_data:
-    last_p = float(ticker_data['lastPrice'])
-    p_change = float(ticker_data['priceChangePercent'])
-    high_p = float(ticker_data['highPrice'])
-    low_p = float(ticker_data['lowPrice'])
-    vol = float(ticker_data['volume'])
+        .brand-logo {
+            color: #f0b90b;
+            font-weight: 800;
+            font-size: 14px;
+            letter-spacing: 0.5px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    change_css = "metric-value-green" if p_change >= 0 else "metric-value-red"
-    
-    with c1:
-        st.markdown(f"<div class='metric-card'><div class='metric-title'>{selected_pair} Price</div><div class='{change_css}'>${last_p:,.2f}</div></div>", unsafe_allow_html=True)
-    with c2:
-        st.markdown(f"<div class='metric-card'><div class='metric-title'>24h Change</div><div class='{change_css}'>{p_change:+.2f}%</div></div>", unsafe_allow_html=True)
-    with c3:
-        st.markdown(f"<div class='metric-card'><div class='metric-title'>24h High</div><div class='metric-value-normal'>${high_p:,.2f}</div></div>", unsafe_allow_html=True)
-    with c4:
-        st.markdown(f"<div class='metric-card'><div class='metric-title'>24h Low</div><div class='metric-value-normal'>${low_p:,.2f}</div></div>", unsafe_allow_html=True)
-    with c5:
-        st.markdown(f"<div class='metric-card'><div class='metric-title'>24h Volume</div><div class='metric-value-normal'>{vol:,.2f}</div></div>", unsafe_allow_html=True)
-else:
-    st.warning("⚠️ Live Ticker Syncing... Retrying API Connection.")
+        .pair-select {
+            background: #161b26;
+            color: #ffffff;
+            border: 1px solid #282f3f;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-weight: 600;
+            cursor: pointer;
+            outline: none;
+        }
 
-st.markdown("<br>", unsafe_allow_html=True)
+        .stat-item {
+            display: flex;
+            flex-direction: column;
+        }
 
-# --- MAIN DASHBOARD (3-COLUMN LAYOUT) ---
-col_chart, col_depth, col_trade = st.columns([3, 1.2, 1.2])
+        .stat-label {
+            font-size: 10px;
+            color: #5d6578;
+            text-transform: uppercase;
+        }
 
-with col_chart:
-    st.subheader("📈 Live Market Chart")
-    tv_interval = tf_map.get(timeframe, "15")
-    
-    # TradingView Pro Widget Embed
-    tv_code = f"""
-    <div class="tradingview-widget-container" style="height:540px;width:100%;">
-      <div id="tradingview_chart" style="height:540px;width:100%;"></div>
-      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-      <script type="text/javascript">
-      new TradingView.widget({{
-        "autosize": true,
-        "symbol": "BINANCE:{selected_pair}",
-        "interval": "{tv_interval}",
-        "timezone": "Etc/UTC",
-        "theme": "dark",
-        "style": "1",
-        "locale": "en",
-        "enable_publishing": false,
-        "hide_side_toolbar": false,
-        "allow_symbol_change": true,
-        "container_id": "tradingview_chart"
-      }});
-      </script>
+        .stat-value {
+            font-size: 12px;
+            font-weight: 600;
+            color: #e1e4ea;
+        }
+
+        .val-green { color: #00c076; }
+        .val-red { color: #ff4d4f; }
+
+        .btn-deposit {
+            background-color: #1e2538;
+            color: #e1e4ea;
+            border: 1px solid #2e374e;
+            padding: 5px 12px;
+            border-radius: 4px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        /* MAIN TERMINAL GRID */
+        .grid-container {
+            display: grid;
+            grid-template-columns: 1fr 320px 280px;
+            grid-template-rows: calc(100vh - 180px) 132px;
+            gap: 2px;
+            background-color: #121722;
+            height: calc(100vh - 48px);
+        }
+
+        .panel {
+            background-color: #0d1117;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* CHART PANEL */
+        #chart-box {
+            grid-column: 1 / 2;
+            grid-row: 1 / 2;
+        }
+
+        /* ORDER BOOK / DEPTH PANEL */
+        .depth-panel {
+            grid-column: 2 / 3;
+            grid-row: 1 / 2;
+            border-left: 1px solid #161b26;
+            display: flex;
+            flex-direction: column;
+            padding: 10px;
+        }
+
+        .panel-header {
+            font-size: 11px;
+            font-weight: 700;
+            color: #60687b;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .ob-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            padding: 3px 0;
+            font-family: monospace;
+        }
+
+        .ob-ask { color: #ff4d4f; }
+        .ob-bid { color: #00c076; }
+
+        /* EXECUTION PANEL */
+        .exec-panel {
+            grid-column: 3 / 4;
+            grid-row: 1 / 3;
+            border-left: 1px solid #161b26;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .trade-tabs {
+            display: flex;
+            background: #161b26;
+            border-radius: 4px;
+            padding: 2px;
+        }
+
+        .tab-btn {
+            flex: 1;
+            padding: 6px;
+            text-align: center;
+            font-size: 11px;
+            font-weight: 600;
+            border: none;
+            background: transparent;
+            color: #717b91;
+            cursor: pointer;
+            border-radius: 3px;
+        }
+
+        .tab-btn.active {
+            background-color: #212838;
+            color: #ffffff;
+        }
+
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .input-label {
+            font-size: 10px;
+            color: #5d6578;
+        }
+
+        .field-input {
+            background-color: #131824;
+            border: 1px solid #202738;
+            border-radius: 4px;
+            color: #ffffff;
+            padding: 8px;
+            font-size: 12px;
+            outline: none;
+        }
+
+        .btn-buy {
+            background-color: #00c076;
+            color: #ffffff;
+            border: none;
+            padding: 10px;
+            border-radius: 4px;
+            font-weight: 700;
+            cursor: pointer;
+            margin-top: 6px;
+        }
+
+        .btn-sell {
+            background-color: #ff4d4f;
+            color: #ffffff;
+            border: none;
+            padding: 10px;
+            border-radius: 4px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        /* BOTTOM POSITIONS PANEL */
+        .bottom-panel {
+            grid-column: 1 / 3;
+            grid-row: 2 / 3;
+            border-top: 1px solid #161b26;
+            padding: 10px;
+        }
+
+        .table-pos {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+            text-align: left;
+        }
+
+        .table-pos th {
+            color: #5d6578;
+            font-weight: 500;
+            padding-bottom: 6px;
+        }
+
+        .table-pos td {
+            color: #c5c9d3;
+            padding: 6px 0;
+            border-top: 1px solid #131824;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- TOP NAV BAR -->
+    <div class="top-nav">
+        <div class="nav-left">
+            <div class="brand-logo">⚡ INF-TERMINAL</div>
+            <select class="pair-select" id="pairSelect" onchange="changeSymbol()">
+                <option value="BTCUSDT">BTC/USDT</option>
+                <option value="ETHUSDT">ETH/USDT</option>
+                <option value="SOLUSDT">SOL/USDT</option>
+            </select>
+            <div class="stat-item">
+                <span class="stat-label">Price</span>
+                <span class="stat-value val-green" id="lastPrice">$64,108.01</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">24h Change</span>
+                <span class="stat-value val-red" id="priceChange">-1.22%</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">24h High</span>
+                <span class="stat-value">$65,400.00</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">24h Low</span>
+                <span class="stat-value">$63,800.00</span>
+            </div>
+        </div>
+        <div class="nav-right">
+            <div class="stat-item" style="text-align: right;">
+                <span class="stat-label">Account Balance</span>
+                <span class="stat-value" style="color: #00c076;">$27,594.00 USDT</span>
+            </div>
+            <button class="btn-deposit">Deposit</button>
+        </div>
     </div>
-    """
-    components.html(tv_code, height=550)
 
-with col_depth:
-    st.subheader("📊 Order Book")
-    if ticker_data:
-        curr_price = float(ticker_data['lastPrice'])
-        asks_df = pd.DataFrame({
-            "Price ($)": [round(curr_price + i*12.5, 2) for i in range(5, 0, -1)],
-            "Size": [0.15, 0.82, 1.45, 0.22, 0.65]
-        })
-        bids_df = pd.DataFrame({
-            "Price ($)": [round(curr_price - i*12.5, 2) for i in range(1, 6)],
-            "Size": [1.12, 0.45, 2.30, 0.18, 0.95]
-        })
-        
-        st.markdown("<div class='order-book-title'>🔴 Asks (Sell Orders)</div>", unsafe_allow_html=True)
-        st.dataframe(asks_df, use_container_width=True, height=160, hide_index=True)
-        
-        st.markdown("<div class='order-book-title'>🟢 Bids (Buy Orders)</div>", unsafe_allow_html=True)
-        st.dataframe(bids_df, use_container_width=True, height=160, hide_index=True)
+    <!-- MAIN TERMINAL LAYOUT -->
+    <div class="grid-container">
+        <!-- CHART -->
+        <div class="panel" id="chart-box">
+            <div id="tv_chart_container" style="height: 100%; width: 100%;"></div>
+        </div>
 
-with col_trade:
-    st.subheader("⚡ Execution")
-    order_type = st.radio("Order Type", ["Market", "Limit", "Conditional"], horizontal=True)
-    margin_mode = st.selectbox("Margin Mode", ["Isolated 20x", "Cross 50x", "Cross 100x"])
-    
-    trade_amount = st.number_input("Amount (USDT)", min_value=10.0, value=100.0, step=10.0)
-    
-    st.markdown("<br>", unsafe_allow_html=True)
-    btn_buy = st.button("BUY / LONG")
-    btn_sell = st.button("SELL / SHORT")
+        <!-- DEPTH / ORDER BOOK -->
+        <div class="panel depth-panel">
+            <div class="panel-header">
+                <span>Order Book</span>
+                <span>Size (BTC)</span>
+            </div>
+            <div id="asks" style="margin-bottom: 8px;">
+                <div class="ob-row ob-ask"><span>64,120.00</span><span>0.421</span></div>
+                <div class="ob-row ob-ask"><span>64,115.50</span><span>1.105</span></div>
+                <div class="ob-row ob-ask"><span>64,112.00</span><span>0.080</span></div>
+                <div class="ob-row ob-ask"><span>64,110.00</span><span>2.450</span></div>
+            </div>
+            <div style="padding: 6px 0; font-weight: bold; color: #00c076; font-size: 13px; border-top: 1px solid #1a202c; border-bottom: 1px solid #1a202c; margin-bottom: 8px;">
+                $64,108.01 <span style="font-size: 10px; color: #60687b; font-weight: normal;">↑ Market Price</span>
+            </div>
+            <div id="bids">
+                <div class="ob-row ob-bid"><span>64,105.00</span><span>1.890</span></div>
+                <div class="ob-row ob-bid"><span>64,102.50</span><span>0.320</span></div>
+                <div class="ob-row ob-bid"><span>64,100.00</span><span>5.120</span></div>
+                <div class="ob-row ob-bid"><span>64,095.00</span><span>0.750</span></div>
+            </div>
+        </div>
 
-# --- BOTTOM SECTION: POSITIONS & HISTORY ---
-st.divider()
-st.subheader("📋 Account & Active Trades")
-tab1, tab2, tab3 = st.tabs(["Open Positions", "Order History", "Bot AI Logs"])
+        <!-- EXECUTION PANEL -->
+        <div class="panel exec-panel">
+            <div class="trade-tabs">
+                <button class="tab-btn active">Limit</button>
+                <button class="tab-btn">Market</button>
+                <button class="tab-btn">Pro AI</button>
+            </div>
 
-with tab1:
-    st.info("No active open positions currently.")
-with tab2:
-    st.caption("Recent completed trades will appear here.")
-with tab3:
-    st.code("System Status: ONLINE\nMarket Data Feed: Binance Public WebSocket/REST\nAI Engine: Ready", language="text")
+            <div class="input-group">
+                <span class="input-label">Margin Mode / Leverage</span>
+                <input type="text" class field-input value="Cross 20x" readonly style="cursor: pointer; text-align: center; color: #f0b90b;">
+            </div>
+
+            <div class="input-group">
+                <span class="input-label">Order Price</span>
+                <input type="text" class="field-input" value="64,108.01 USDT">
+            </div>
+
+            <div class="input-group">
+                <span class="input-label">Amount</span>
+                <input type="text" class="field-input" placeholder="0.00 BTC">
+            </div>
+
+            <div class="input-group">
+                <span class="input-label">Take Profit / Stop Loss</span>
+                <input type="text" class="field-input" placeholder="TP / SL Price">
+            </div>
+
+            <button class="btn-buy">BUY / LONG</button>
+            <button class="btn-sell">SELL / SHORT</button>
+        </div>
+
+        <!-- POSITIONS & HISTORY -->
+        <div class="panel bottom-panel">
+            <div class="panel-header">
+                <span>Active Positions (3)</span>
+                <span style="color: #00c076;">Unrealized PnL: +$487.20</span>
+            </div>
+            <table class="table-pos">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Type</th>
+                        <th>Size</th>
+                        <th>Entry Price</th>
+                        <th>Mark Price</th>
+                        <th>PNL (ROE%)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td style="color: #ffffff; font-weight: bold;">BTCUSDT</td>
+                        <td style="color: #00c076;">LONG 20x</td>
+                        <td>0.50 BTC</td>
+                        <td>$63,950.00</td>
+                        <td>$64,108.01</td>
+                        <td style="color: #00c076;">+$790.05 (+24.5%)</td>
+                    </tr>
+                    <tr>
+                        <td style="color: #ffffff; font-weight: bold;">ETHUSDT</td>
+                        <td style="color: #ff4d4f;">SHORT 10x</td>
+                        <td>4.00 ETH</td>
+                        <td>$3,480.00</td>
+                        <td>$3,450.20</td>
+                        <td style="color: #00c076;">+$119.20 (+8.2%)</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- TRADINGVIEW EMBED SCRIPT -->
+    <script>
+        let widget;
+        function loadChart(symbol) {
+            document.getElementById('tv_chart_container').innerHTML = '';
+            widget = new TradingView.widget({
+                "autosize": true,
+                "symbol": "BINANCE:" + symbol,
+                "interval": "15",
+                "timezone": "Etc/UTC",
+                "theme": "dark",
+                "style": "1",
+                "locale": "en",
+                "enable_publishing": false,
+                "hide_side_toolbar": false,
+                "allow_symbol_change": false,
+                "container_id": "tv_chart_container",
+                "backgroundColor": "#0d1117",
+                "gridColor": "#161b26"
+            });
+        }
+
+        function changeSymbol() {
+            const sym = document.getElementById('pairSelect').value;
+            loadChart(sym);
+        }
+
+        // Initialize Chart
+        loadChart("BTCUSDT");
+    </script>
+</body>
+</html>
+"""
+
+# Render Fullscreen Component
+components.html(terminal_html, height=950, scrolling=False)
