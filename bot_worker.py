@@ -1,7 +1,7 @@
 """
 bot_worker.py
 
-Autonomous futures trading worker.
+Autonomous PAPER TRADING worker.
 
 Flow:
 Market Data
@@ -10,43 +10,38 @@ Signal Engine
     ↓
 Risk Manager
     ↓
-Trade Executor
+Paper Trader
     ↓
-Automatic TP / SL
+Automatic simulated TP / SL
 
 IMPORTANT:
-This worker is locked to TESTNET through TradeExecutor.
-Do not use real funds until the complete system has been
-properly tested and validated.
+This version does NOT send real orders to Binance or Bybit.
 """
 
 import os
 import time
 from datetime import datetime, timezone
 
-from exchanges import get_client
 from market_data import get_candles
 from signal_engine import generate_signal
-from trade_executor import TradeExecutor
+from risk_manager import calculate_trade_plan, validate_trade_plan
+from paper_trader import PaperTrader
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-EXCHANGE = os.environ.get("EXCHANGE", "Binance")
-
-API_KEY = os.environ.get("API_KEY", "")
-API_SECRET = os.environ.get("API_SECRET", "")
-
-USE_TESTNET = (
-    os.environ.get("USE_TESTNET", "true").lower() == "true"
-)
+EXCHANGE = os.environ.get("EXCHANGE", "Bybit")
 
 SYMBOL = os.environ.get("SYMBOL", "BTCUSDT")
 
-LEVERAGE = int(
-    os.environ.get("LEVERAGE", "5")
+PAPER_TRADING = (
+    os.environ.get("PAPER_TRADING", "true").lower() == "true"
+)
+
+PAPER_BALANCE = float(
+    os.environ.get("PAPER_BALANCE", "10000")
 )
 
 RISK_PCT = float(
@@ -71,10 +66,30 @@ MAX_DAILY_LOSS_PCT = float(
 
 
 # ============================================================
+# SAFETY
+# ============================================================
+
+if not PAPER_TRADING:
+    raise RuntimeError(
+        "Safety lock: this worker currently supports "
+        "PAPER_TRADING=true only."
+    )
+
+
+# ============================================================
+# PAPER TRADER
+# ============================================================
+
+paper = PaperTrader(
+    starting_balance=PAPER_BALANCE
+)
+
+
+# ============================================================
 # DAILY RISK STATE
 # ============================================================
 
-_day_start_balance = None
+_day_start_balance = PAPER_BALANCE
 _day_start_date = None
 _trading_paused = False
 
@@ -95,7 +110,7 @@ def log(message):
 
 
 # ============================================================
-# CIRCUIT BREAKER
+# DAILY CIRCUIT BREAKER
 # ============================================================
 
 def check_circuit_breaker(balance):
@@ -107,7 +122,6 @@ def check_circuit_breaker(balance):
         timezone.utc
     ).date()
 
-    # New trading day
     if _day_start_date != today:
 
         _day_start_date = today
@@ -116,34 +130,52 @@ def check_circuit_breaker(balance):
 
         log(
             f"New trading day. "
-            f"Starting balance: {balance:.2f}"
+            f"Starting paper balance: {balance:.2f}"
         )
 
         return
 
-    if (
-        _day_start_balance is not None
-        and _day_start_balance > 0
-    ):
+    if _day_start_balance <= 0:
+        return
 
-        drawdown_pct = (
-            (_day_start_balance - balance)
-            / _day_start_balance
-            * 100
-        )
+    drawdown_pct = (
+        (_day_start_balance - balance)
+        / _day_start_balance
+        * 100
+    )
 
-        if (
-            drawdown_pct >= MAX_DAILY_LOSS_PCT
-            and not _trading_paused
-        ):
+    if drawdown_pct >= MAX_DAILY_LOSS_PCT:
+
+        if not _trading_paused:
 
             _trading_paused = True
 
             log(
-                "CIRCUIT BREAKER ACTIVATED: "
-                f"daily loss {drawdown_pct:.2f}% "
-                f">= {MAX_DAILY_LOSS_PCT}%"
+                "CIRCUIT BREAKER ACTIVATED | "
+                f"Daily loss={drawdown_pct:.2f}%"
             )
+
+
+# ============================================================
+# MARKET DATA
+# ============================================================
+
+def get_market_candles():
+
+    return get_candles(
+        exchange=EXCHANGE,
+        symbol=SYMBOL,
+        timeframe_minutes=15,
+        limit=100,
+
+        # No private API credentials required
+        # for public market-data requests.
+        api_key="",
+        api_secret="",
+
+        # Use public exchange market data.
+        use_testnet=False,
+    )
 
 
 # ============================================================
@@ -154,65 +186,15 @@ def run_once():
 
     global _trading_paused
 
-    # --------------------------------------------------------
-    # Balance
-    # --------------------------------------------------------
-
-    balance = client.get_balance()
-
-    if balance is None:
-
-        log(
-            "Could not fetch balance. "
-            "Check API credentials and permissions."
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Daily risk protection
-    # --------------------------------------------------------
+    balance = paper.get_balance()
 
     check_circuit_breaker(balance)
-
-    if _trading_paused:
-
-        log(
-            "Trading paused by daily loss circuit breaker."
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Existing position check
-    # --------------------------------------------------------
-
-    position = client.get_position(
-        SYMBOL
-    )
-
-    if position:
-
-        log(
-            f"Existing position detected: "
-            f"{position}"
-        )
-
-        return
 
     # --------------------------------------------------------
     # Market candles
     # --------------------------------------------------------
 
-    candles = get_candles(
-        exchange=EXCHANGE,
-        symbol=SYMBOL,
-        timeframe_minutes=15,
-        limit=100,
-        api_key=API_KEY,
-        api_secret=API_SECRET,
-        use_testnet=USE_TESTNET,
-    )
+    candles = get_market_candles()
 
     if candles is None:
 
@@ -225,13 +207,70 @@ def run_once():
     if len(candles) < 50:
 
         log(
-            "Not enough candles for signal analysis."
+            "Not enough candles for analysis."
+        )
+
+        return
+
+    current_price = float(
+        candles["close"].iloc[-1]
+    )
+
+    # --------------------------------------------------------
+    # Monitor currently open PAPER position
+    # --------------------------------------------------------
+
+    existing_position = paper.get_position()
+
+    if existing_position:
+
+        result = paper.update_price(
+            current_price
+        )
+
+        if result:
+
+            status = result.get("status")
+
+            if status == "CLOSED":
+
+                log(
+                    "PAPER TRADE CLOSED | "
+                    f"Side={result.get('side')} | "
+                    f"Entry={result.get('entry_price'):.4f} | "
+                    f"Exit={result.get('exit_price'):.4f} | "
+                    f"PnL={result.get('pnl'):.2f} | "
+                    f"Reason={result.get('reason')} | "
+                    f"Balance={result.get('balance'):.2f}"
+                )
+
+            else:
+
+                log(
+                    "PAPER POSITION OPEN | "
+                    f"{existing_position['side']} | "
+                    f"Entry={existing_position['entry_price']:.4f} | "
+                    f"Current={current_price:.4f} | "
+                    f"TP={existing_position['take_profit']:.4f} | "
+                    f"SL={existing_position['stop_loss']:.4f}"
+                )
+
+        return
+
+    # --------------------------------------------------------
+    # Stop new trades if daily loss breaker is active
+    # --------------------------------------------------------
+
+    if _trading_paused:
+
+        log(
+            "Paper trading paused by daily loss limit."
         )
 
         return
 
     # --------------------------------------------------------
-    # Signal engine
+    # Generate trading signal
     # --------------------------------------------------------
 
     signal_data = generate_signal(
@@ -248,132 +287,98 @@ def run_once():
         0
     )
 
-    price = signal_data.get(
-        "price"
-    )
-
     rsi = signal_data.get(
-        "rsi"
+        "rsi",
+        0
+    )
+
+    reason = signal_data.get(
+        "reason",
+        ""
     )
 
     log(
-        f"[{EXCHANGE}] "
-        f"{SYMBOL} "
-        f"price={price} "
-        f"signal={signal} "
-        f"score={score} "
-        f"RSI={rsi}"
+        f"[PAPER] [{EXCHANGE}] "
+        f"{SYMBOL} | "
+        f"Price={current_price:.4f} | "
+        f"Signal={signal} | "
+        f"Score={score} | "
+        f"RSI={rsi:.2f} | "
+        f"Balance={balance:.2f}"
     )
 
-    # --------------------------------------------------------
-    # No signal
-    # --------------------------------------------------------
+    log(
+        f"Signal reason: {reason}"
+    )
 
-    if signal == "NO TRADE":
+    if signal not in (
+        "BUY",
+        "SELL",
+    ):
 
         log(
-            "No strong trading signal. "
-            "Waiting..."
+            "No strong signal. Waiting..."
         )
 
         return
 
     # --------------------------------------------------------
-    # Create autonomous executor
+    # Risk management
     # --------------------------------------------------------
 
-    executor = TradeExecutor(
-        exchange=EXCHANGE,
-        api_key=API_KEY,
-        api_secret=API_SECRET,
-        use_testnet=USE_TESTNET,
-    )
-
-    # --------------------------------------------------------
-    # Create risk-managed trade plan
-    # --------------------------------------------------------
-
-    plan = executor.create_trade_plan(
+    plan = calculate_trade_plan(
         balance=balance,
-        entry_price=price,
+        entry_price=current_price,
         signal=signal,
         risk_percent=RISK_PCT,
         stop_loss_percent=SL_PCT,
         take_profit_percent=TP_PCT,
     )
 
-    if plan.get("action") != "TRADE":
+    if not validate_trade_plan(plan):
 
         log(
-            f"Trade rejected by risk manager: "
-            f"{plan}"
+            f"Trade plan rejected: {plan}"
         )
 
         return
 
-    log(
-        f"TRADE PLAN: "
-        f"side={plan['side']} "
-        f"quantity={plan['quantity']:.6f} "
-        f"entry={plan['entry_price']:.4f} "
-        f"TP={plan['take_profit']:.4f} "
-        f"SL={plan['stop_loss']:.4f}"
-    )
-
     # --------------------------------------------------------
-    # Autonomous execution
+    # Open PAPER trade
     # --------------------------------------------------------
 
-    result = executor.execute(
+    result = paper.open_trade(
         symbol=SYMBOL,
-        balance=balance,
-        entry_price=price,
         signal=signal,
-        risk_percent=RISK_PCT,
-        stop_loss_percent=SL_PCT,
-        take_profit_percent=TP_PCT,
+        entry_price=current_price,
+        quantity=plan["quantity"],
+        take_profit=plan["take_profit"],
+        stop_loss=plan["stop_loss"],
     )
 
-    # --------------------------------------------------------
-    # Result
-    # --------------------------------------------------------
+    if result.get("status") == "EXECUTED":
 
-    status = result.get(
-        "status",
-        "UNKNOWN"
-    )
-
-    if status == "EXECUTED":
+        position = result["position"]
 
         log(
-            "AUTONOMOUS TRADE EXECUTED"
-        )
-
-        log(
-            f"Side={result.get('side')} "
-            f"Quantity={result.get('quantity')} "
-            f"Entry={result.get('entry')} "
-            f"TP={result.get('take_profit')} "
-            f"SL={result.get('stop_loss')}"
-        )
-
-    elif status == "SKIPPED":
-
-        log(
-            f"Trade skipped: "
-            f"{result.get('reason')}"
+            "PAPER TRADE OPENED | "
+            f"{position['side']} | "
+            f"{SYMBOL} | "
+            f"Entry={position['entry_price']:.4f} | "
+            f"Qty={position['quantity']:.6f} | "
+            f"TP={position['take_profit']:.4f} | "
+            f"SL={position['stop_loss']:.4f}"
         )
 
     else:
 
         log(
-            f"Trade execution error: "
-            f"{result}"
+            f"Paper trade skipped: {result}"
         )
 
 
 # ============================================================
-# START WORKER
+# WORKER START
 # ============================================================
 
 def main():
@@ -383,11 +388,11 @@ def main():
     )
 
     log(
-        "AUTONOMOUS FUTURES BOT STARTING"
+        "AUTONOMOUS PAPER TRADING BOT STARTING"
     )
 
     log(
-        f"Exchange: {EXCHANGE}"
+        f"Exchange market data: {EXCHANGE}"
     )
 
     log(
@@ -395,81 +400,34 @@ def main():
     )
 
     log(
-        f"Mode: "
-        f"{'TESTNET' if USE_TESTNET else 'LIVE'}"
+        f"Starting paper balance: "
+        f"{PAPER_BALANCE:.2f} USDT"
     )
 
     log(
-        f"Leverage: {LEVERAGE}x"
+        f"Risk per trade: {RISK_PCT}%"
     )
 
     log(
-        f"Risk: {RISK_PCT}%"
+        f"Take Profit: {TP_PCT}%"
     )
 
     log(
-        f"TP: {TP_PCT}%"
+        f"Stop Loss: {SL_PCT}%"
     )
 
     log(
-        f"SL: {SL_PCT}%"
+        f"Polling interval: "
+        f"{POLL_SECONDS} seconds"
     )
 
     log(
-        f"Polling: {POLL_SECONDS}s"
+        "REAL ORDERS: DISABLED"
     )
 
     log(
         "========================================"
     )
-
-    # --------------------------------------------------------
-    # Credentials
-    # --------------------------------------------------------
-
-    if not API_KEY or not API_SECRET:
-
-        log(
-            "ERROR: API_KEY / API_SECRET "
-            "are not configured."
-        )
-
-        raise SystemExit(1)
-
-    # --------------------------------------------------------
-    # Safety
-    # --------------------------------------------------------
-
-    if not USE_TESTNET:
-
-        log(
-            "SAFETY ERROR: "
-            "This autonomous worker requires "
-            "USE_TESTNET=true."
-        )
-
-        raise SystemExit(1)
-
-    # --------------------------------------------------------
-    # Exchange client
-    # --------------------------------------------------------
-
-    global client
-
-    client = get_client(
-        EXCHANGE,
-        API_KEY,
-        API_SECRET,
-        USE_TESTNET,
-    )
-
-    log(
-        "Exchange connection initialized."
-    )
-
-    # --------------------------------------------------------
-    # Continuous loop
-    # --------------------------------------------------------
 
     while True:
 
@@ -496,10 +454,6 @@ def main():
             POLL_SECONDS
         )
 
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
     main()
