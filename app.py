@@ -1,3 +1,22 @@
+"""
+app.py
+
+PRO AI TERMINAL
+Autonomous Paper Trading Dashboard
+
+Market data:
+    UK-friendly public market_data.py provider
+
+Trading logic:
+    signal_engine.py
+    risk_manager.py
+    paper_trader.py
+
+IMPORTANT:
+    REAL AUTOMATIC ORDERS ARE DISABLED.
+    This version is for autonomous PAPER TRADING only.
+"""
+
 import os
 import time
 import threading
@@ -8,8 +27,7 @@ import pandas as pd
 import numpy as np
 import streamlit.components.v1 as components
 
-from exchanges import get_client
-from market_data import get_candles
+from market_data import get_ticker, get_candles
 from signal_engine import generate_signal
 from risk_manager import calculate_trade_plan, validate_trade_plan
 from paper_trader import PaperTrader
@@ -21,28 +39,24 @@ from paper_trader import PaperTrader
 
 st.set_page_config(
     page_title="PRO AI TERMINAL",
+    page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 
 # ============================================================
-# ENVIRONMENT / PAPER BOT CONFIG
+# ENVIRONMENT CONFIG
 # ============================================================
 
 PAPER_TRADING = (
     os.environ.get("PAPER_TRADING", "true").lower() == "true"
 )
 
-PAPER_EXCHANGE = os.environ.get(
-    "EXCHANGE",
-    "Bybit",
-)
-
 PAPER_SYMBOL = os.environ.get(
     "SYMBOL",
     "BTCUSDT",
-)
+).upper()
 
 PAPER_BALANCE = float(
     os.environ.get(
@@ -51,28 +65,28 @@ PAPER_BALANCE = float(
     )
 )
 
-PAPER_RISK_PCT = float(
+RISK_PCT = float(
     os.environ.get(
         "RISK_PCT",
         "1",
     )
 )
 
-PAPER_SL_PCT = float(
+SL_PCT = float(
     os.environ.get(
         "SL_PCT",
         "1",
     )
 )
 
-PAPER_TP_PCT = float(
+TP_PCT = float(
     os.environ.get(
         "TP_PCT",
         "2",
     )
 )
 
-PAPER_POLL_SECONDS = int(
+POLL_SECONDS = int(
     os.environ.get(
         "POLL_SECONDS",
         "60",
@@ -88,150 +102,13 @@ MAX_DAILY_LOSS_PCT = float(
 
 
 # ============================================================
-# SESSION STATE
-# ============================================================
-
-if "order_mode" not in st.session_state:
-    st.session_state.order_mode = "Limit"
-
-if "use_testnet" not in st.session_state:
-    # Important:
-    # False prevents the UI from automatically calling
-    # Binance/Bybit testnet endpoints.
-    st.session_state.use_testnet = False
-
-if "exchange" not in st.session_state:
-    st.session_state.exchange = "Bybit"
-
-if "trade_log" not in st.session_state:
-    st.session_state.trade_log = []
-
-if "api_key" not in st.session_state:
-    st.session_state.api_key = ""
-
-if "api_secret" not in st.session_state:
-    st.session_state.api_secret = ""
-
-
-# ============================================================
-# STYLING
-# ============================================================
-
-st.markdown(
-    """
-<style>
-
-#MainMenu, footer, header {
-    visibility: hidden;
-}
-
-.block-container {
-    padding-top: 0.5rem !important;
-    padding-bottom: 0rem !important;
-    padding-left: 0.8rem !important;
-    padding-right: 0.8rem !important;
-    max-width: 100% !important;
-}
-
-.stApp {
-    background-color: #080a0d;
-    color: #9097a6;
-}
-
-.stat-label {
-    font-size: 10px;
-    color: #5d6578;
-    text-transform: uppercase;
-}
-
-.stat-value {
-    font-size: 13px;
-    font-weight: bold;
-    color: #e1e4ea;
-}
-
-.val-green {
-    color: #00c076 !important;
-}
-
-.val-red {
-    color: #ff4d4f !important;
-}
-
-div[data-baseweb="select"] > div,
-div[data-baseweb="input"] > div {
-    background-color: #131824 !important;
-    border-color: #202738 !important;
-    color: #ffffff !important;
-}
-
-.ob-header {
-    font-size: 11px;
-    font-weight: 700;
-    color: #60687b;
-    text-transform: uppercase;
-    margin-bottom: 6px;
-}
-
-.rsi-box {
-    background: #131824;
-    border: 1px solid #202738;
-    border-radius: 6px;
-    padding: 8px;
-    text-align: center;
-}
-
-.warn-box {
-    background: #2a1810;
-    border: 1px solid #ff8a00;
-    border-radius: 6px;
-    padding: 8px;
-    font-size: 12px;
-    color: #ffb84d;
-}
-
-.safe-box {
-    background: #0d2018;
-    border: 1px solid #00c076;
-    border-radius: 6px;
-    padding: 8px;
-    font-size: 12px;
-    color: #79e8b7;
-}
-
-.exch-badge {
-    display: inline-block;
-    background: #131824;
-    border: 1px solid #202738;
-    border-radius: 4px;
-    padding: 2px 8px;
-    font-size: 11px;
-    color: #e1e4ea;
-}
-
-.paper-card {
-    background: #10151f;
-    border: 1px solid #202738;
-    border-radius: 8px;
-    padding: 12px;
-    margin-top: 6px;
-}
-
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
-# SYMBOLS
+# AVAILABLE MARKET SYMBOLS
 # ============================================================
 
 TOP_SYMBOLS = [
     "BTCUSDT",
     "ETHUSDT",
     "SOLUSDT",
-    "BNBUSDT",
     "XRPUSDT",
     "ADAUSDT",
     "DOGEUSDT",
@@ -244,91 +121,137 @@ TOP_SYMBOLS = [
 
 
 # ============================================================
-# LOCAL RSI FOR UI
+# SESSION STATE
 # ============================================================
 
-def calculate_rsi(
-    closes,
-    period=14,
-):
-    delta = closes.diff()
+if "selected_pair" not in st.session_state:
+    st.session_state.selected_pair = PAPER_SYMBOL
 
-    gain = delta.where(
-        delta > 0,
-        0.0,
-    )
+if "display_exchange" not in st.session_state:
+    st.session_state.display_exchange = "Bybit"
 
-    loss = -delta.where(
-        delta < 0,
-        0.0,
-    )
-
-    avg_gain = gain.rolling(
-        period
-    ).mean()
-
-    avg_loss = loss.rolling(
-        period
-    ).mean()
-
-    rs = (
-        avg_gain
-        / avg_loss.replace(
-            0,
-            np.nan,
-        )
-    )
-
-    rsi = 100 - (
-        100 / (1 + rs)
-    )
-
-    return rsi.fillna(50)
+if "trade_log" not in st.session_state:
+    st.session_state.trade_log = []
 
 
 # ============================================================
-# POSITION SIZE
+# STYLE
 # ============================================================
 
-def calc_position_size(
-    balance,
-    risk_pct,
-    entry_price,
-    sl_price,
-):
-    if (
-        balance is None
-        or entry_price is None
-        or sl_price is None
-    ):
-        return 0.0
+st.markdown(
+    """
+<style>
 
-    risk_amount = (
-        balance
-        * (risk_pct / 100)
-    )
+#MainMenu,
+footer,
+header {
+    visibility: hidden;
+}
 
-    sl_distance = abs(
-        entry_price - sl_price
-    )
+.block-container {
+    padding-top: 0.7rem !important;
+    padding-bottom: 1rem !important;
+    padding-left: 0.9rem !important;
+    padding-right: 0.9rem !important;
+    max-width: 100% !important;
+}
 
-    if sl_distance <= 0:
-        return 0.0
+.stApp {
+    background-color: #080a0d;
+    color: #e7ebf2;
+}
 
-    return round(
-        risk_amount / sl_distance,
-        6,
-    )
+[data-testid="stSidebar"] {
+    background-color: #0d1117;
+    border-right: 1px solid #1f2937;
+}
+
+.hero {
+    border: 1px solid #1f2937;
+    background: linear-gradient(
+        135deg,
+        #0d1117,
+        #101722
+    );
+    border-radius: 12px;
+    padding: 14px 18px;
+    margin-bottom: 12px;
+}
+
+.hero-title {
+    font-size: 25px;
+    font-weight: 800;
+    color: #ffffff;
+}
+
+.hero-sub {
+    font-size: 12px;
+    color: #7f8ba3;
+}
+
+.safe-box {
+    background: #0c2118;
+    border: 1px solid #00c076;
+    border-radius: 8px;
+    padding: 10px;
+    color: #8ce8bf;
+    font-size: 12px;
+}
+
+.warn-box {
+    background: #2c1b0d;
+    border: 1px solid #ff9500;
+    border-radius: 8px;
+    padding: 10px;
+    color: #ffc26b;
+    font-size: 12px;
+}
+
+.bot-card {
+    background: #0d1117;
+    border: 1px solid #202938;
+    border-radius: 10px;
+    padding: 12px;
+}
+
+.status-green {
+    color: #00c076;
+    font-weight: 700;
+}
+
+.status-red {
+    color: #ff4d4f;
+    font-weight: 700;
+}
+
+.status-yellow {
+    color: #f5b942;
+    font-weight: 700;
+}
+
+.small-label {
+    font-size: 10px;
+    color: #69758b;
+    text-transform: uppercase;
+}
+
+.market-price {
+    font-size: 25px;
+    font-weight: 800;
+}
+
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
 
 # ============================================================
-# AUTONOMOUS PAPER BOT LOOP
+# AUTONOMOUS PAPER BOT
 # ============================================================
 
-def paper_bot_loop(
-    state,
-    lock,
-):
+def paper_bot_loop(state, lock):
+
     trader = PaperTrader(
         starting_balance=PAPER_BALANCE
     )
@@ -341,15 +264,17 @@ def paper_bot_loop(
 
         try:
 
-            # ------------------------------------------------
-            # Daily loss protection
-            # ------------------------------------------------
-
-            today = datetime.now(
+            now_utc = datetime.now(
                 timezone.utc
-            ).date()
+            )
+
+            today = now_utc.date()
 
             balance = trader.get_balance()
+
+            # ------------------------------------------------
+            # RESET DAILY RISK STATE
+            # ------------------------------------------------
 
             if day_start_date != today:
 
@@ -357,10 +282,19 @@ def paper_bot_loop(
                 day_start_balance = balance
                 trading_paused = False
 
+            # ------------------------------------------------
+            # DAILY LOSS CIRCUIT BREAKER
+            # ------------------------------------------------
+
+            drawdown_pct = 0.0
+
             if day_start_balance > 0:
 
                 drawdown_pct = (
-                    (day_start_balance - balance)
+                    (
+                        day_start_balance
+                        - balance
+                    )
                     / day_start_balance
                     * 100
                 )
@@ -372,12 +306,11 @@ def paper_bot_loop(
                     trading_paused = True
 
             # ------------------------------------------------
-            # PUBLIC MARKET DATA ONLY
-            # No API key is used here.
+            # UK-FRIENDLY PUBLIC CANDLES
             # ------------------------------------------------
 
             candles = get_candles(
-                exchange=PAPER_EXCHANGE,
+                exchange="PUBLIC",
                 symbol=PAPER_SYMBOL,
                 timeframe_minutes=15,
                 limit=100,
@@ -393,21 +326,24 @@ def paper_bot_loop(
 
                 with lock:
                     state["status"] = (
-                        "Waiting for public market data"
+                        "WAITING FOR MARKET DATA"
+                    )
+                    state["last_update"] = (
+                        now_utc.isoformat()
                     )
 
                 time.sleep(
-                    PAPER_POLL_SECONDS
+                    POLL_SECONDS
                 )
 
                 continue
 
-            price = float(
+            current_price = float(
                 candles["close"].iloc[-1]
             )
 
             # ------------------------------------------------
-            # Monitor existing simulated position
+            # EXISTING PAPER POSITION
             # ------------------------------------------------
 
             existing_position = (
@@ -418,81 +354,110 @@ def paper_bot_loop(
 
                 update_result = (
                     trader.update_price(
-                        price
+                        current_price
                     )
                 )
 
                 with lock:
 
-                    state["price"] = price
-
+                    state["price"] = current_price
                     state["balance"] = (
                         trader.get_balance()
                     )
-
                     state["position"] = (
                         trader.get_position()
                     )
+                    state["drawdown"] = (
+                        drawdown_pct
+                    )
+                    state["last_update"] = (
+                        now_utc.isoformat()
+                    )
 
-                    if (
-                        update_result
-                        and update_result.get(
-                            "status"
+                if (
+                    update_result
+                    and update_result.get(
+                        "status"
+                    )
+                    == "CLOSED"
+                ):
+
+                    with lock:
+
+                        state["status"] = (
+                            "TRADE CLOSED"
                         )
-                        == "CLOSED"
-                    ):
 
                         state[
                             "last_trade"
                         ] = update_result
 
                         state[
-                            "status"
-                        ] = (
-                            "Paper trade closed: "
-                            f"{update_result.get('reason')}"
-                        )
-
-                        state[
                             "trade_count"
                         ] += 1
 
-                    else:
-
                         state[
-                            "status"
-                        ] = (
-                            "Paper position open"
+                            "realized_pnl"
+                        ] += float(
+                            update_result.get(
+                                "pnl",
+                                0,
+                            )
+                        )
+
+                    print(
+                        "[PAPER BOT] "
+                        f"CLOSED "
+                        f"{update_result}",
+                        flush=True,
+                    )
+
+                else:
+
+                    with lock:
+                        state["status"] = (
+                            "POSITION OPEN"
                         )
 
                 time.sleep(
-                    PAPER_POLL_SECONDS
+                    POLL_SECONDS
                 )
 
                 continue
 
             # ------------------------------------------------
-            # Do not open new trade if daily breaker triggered
+            # CIRCUIT BREAKER
             # ------------------------------------------------
 
             if trading_paused:
 
                 with lock:
-                    state[
-                        "status"
-                    ] = (
-                        "Paused by daily loss limit"
+
+                    state["status"] = (
+                        "DAILY LOSS LIMIT HIT"
+                    )
+
+                    state["price"] = (
+                        current_price
+                    )
+
+                    state["balance"] = (
+                        trader.get_balance()
+                    )
+
+                    state["drawdown"] = (
+                        drawdown_pct
                     )
 
                 time.sleep(
-                    PAPER_POLL_SECONDS
+                    POLL_SECONDS
                 )
 
                 continue
 
             # ------------------------------------------------
-            # AI SIGNAL ENGINE
-            # RSI + MACD + Bollinger + EMA + Volume
+            # SIGNAL ENGINE
+            # RSI + MACD + EMA + BOLLINGER + VOLUME
             # ------------------------------------------------
 
             signal_data = generate_signal(
@@ -514,25 +479,37 @@ def paper_bot_loop(
                 "",
             )
 
-            signal_rsi = signal_data.get(
+            rsi = signal_data.get(
                 "rsi",
+                0,
+            )
+
+            macd = signal_data.get(
+                "macd",
                 0,
             )
 
             with lock:
 
-                state["price"] = price
+                state["price"] = current_price
                 state["signal"] = signal
                 state["score"] = score
                 state["reason"] = reason
-                state["rsi"] = signal_rsi
+                state["rsi"] = rsi
+                state["macd"] = macd
                 state["balance"] = (
                     trader.get_balance()
                 )
                 state["position"] = None
+                state["drawdown"] = (
+                    drawdown_pct
+                )
+                state["last_update"] = (
+                    now_utc.isoformat()
+                )
 
             # ------------------------------------------------
-            # No trade unless signal is strong enough
+            # WAIT FOR STRONG SIGNAL
             # ------------------------------------------------
 
             if signal not in (
@@ -541,118 +518,103 @@ def paper_bot_loop(
             ):
 
                 with lock:
-                    state[
-                        "status"
-                    ] = (
-                        "Scanning market"
+                    state["status"] = (
+                        "SCANNING MARKET"
                     )
 
                 time.sleep(
-                    PAPER_POLL_SECONDS
+                    POLL_SECONDS
                 )
 
                 continue
 
             # ------------------------------------------------
-            # Risk Manager
+            # RISK MANAGEMENT
             # ------------------------------------------------
 
-            trade_plan = (
-                calculate_trade_plan(
-                    balance=trader.get_balance(),
-                    entry_price=price,
-                    signal=signal,
-                    risk_percent=PAPER_RISK_PCT,
-                    stop_loss_percent=PAPER_SL_PCT,
-                    take_profit_percent=PAPER_TP_PCT,
-                )
+            plan = calculate_trade_plan(
+                balance=trader.get_balance(),
+                entry_price=current_price,
+                signal=signal,
+                risk_percent=RISK_PCT,
+                stop_loss_percent=SL_PCT,
+                take_profit_percent=TP_PCT,
             )
 
             if not validate_trade_plan(
-                trade_plan
+                plan
             ):
 
                 with lock:
-                    state[
-                        "status"
-                    ] = (
-                        "Signal rejected "
-                        "by risk manager"
+                    state["status"] = (
+                        "TRADE REJECTED BY RISK MANAGER"
                     )
 
                 time.sleep(
-                    PAPER_POLL_SECONDS
+                    POLL_SECONDS
                 )
 
                 continue
 
             # ------------------------------------------------
-            # OPEN SIMULATED TRADE
+            # OPEN PAPER TRADE
             # ------------------------------------------------
 
-            open_result = (
-                trader.open_trade(
-                    symbol=PAPER_SYMBOL,
-                    signal=signal,
-                    entry_price=price,
-                    quantity=trade_plan[
-                        "quantity"
-                    ],
-                    take_profit=trade_plan[
-                        "take_profit"
-                    ],
-                    stop_loss=trade_plan[
-                        "stop_loss"
-                    ],
+            result = trader.open_trade(
+                symbol=PAPER_SYMBOL,
+                signal=signal,
+                entry_price=current_price,
+                quantity=plan[
+                    "quantity"
+                ],
+                take_profit=plan[
+                    "take_profit"
+                ],
+                stop_loss=plan[
+                    "stop_loss"
+                ],
+            )
+
+            if (
+                result.get("status")
+                == "EXECUTED"
+            ):
+
+                with lock:
+
+                    state["status"] = (
+                        "PAPER TRADE OPENED"
+                    )
+
+                    state["position"] = (
+                        trader.get_position()
+                    )
+
+                print(
+                    "[PAPER BOT] "
+                    f"OPENED "
+                    f"{PAPER_SYMBOL} "
+                    f"{signal} "
+                    f"price={current_price} "
+                    f"score={score}",
+                    flush=True,
                 )
-            )
 
-            with lock:
+            else:
 
-                state[
-                    "position"
-                ] = trader.get_position()
-
-                if (
-                    open_result.get(
-                        "status"
+                with lock:
+                    state["status"] = (
+                        "TRADE SKIPPED"
                     )
-                    == "EXECUTED"
-                ):
-
-                    state[
-                        "status"
-                    ] = (
-                        "Paper trade opened"
-                    )
-
-                else:
-
-                    state[
-                        "status"
-                    ] = (
-                        "Paper trade skipped"
-                    )
-
-            print(
-                "[PAPER BOT] "
-                f"{datetime.now(timezone.utc).isoformat()} "
-                f"{PAPER_EXCHANGE} "
-                f"{PAPER_SYMBOL} "
-                f"signal={signal} "
-                f"score={score} "
-                f"price={price}",
-                flush=True,
-            )
 
         except Exception as error:
 
             with lock:
 
-                state[
-                    "status"
-                ] = (
-                    f"Error: {error}"
+                state["status"] = "ERROR"
+
+                state["error"] = str(
+                    error
                 )
 
             print(
@@ -662,37 +624,45 @@ def paper_bot_loop(
             )
 
         time.sleep(
-            PAPER_POLL_SECONDS
+            POLL_SECONDS
         )
 
 
 # ============================================================
-# START PAPER BOT ONCE
+# START BOT ONLY ONCE
 # ============================================================
 
 @st.cache_resource
 def start_paper_bot():
 
     state = {
-        "status": "Starting",
+        "status": "STARTING",
         "price": None,
         "signal": "NO TRADE",
         "score": 0,
         "reason": "",
         "rsi": None,
+        "macd": None,
         "balance": PAPER_BALANCE,
         "position": None,
         "last_trade": None,
         "trade_count": 0,
+        "realized_pnl": 0.0,
+        "drawdown": 0.0,
+        "last_update": None,
+        "error": None,
     }
 
     lock = threading.Lock()
 
     thread = threading.Thread(
         target=paper_bot_loop,
-        args=(state, lock),
+        args=(
+            state,
+            lock,
+        ),
         daemon=True,
-        name="paper-trading-bot",
+        name="autonomous-paper-bot",
     )
 
     thread.start()
@@ -707,28 +677,48 @@ def start_paper_bot():
 if PAPER_TRADING:
 
     (
-        paper_bot_state,
-        paper_bot_lock,
-        paper_bot_thread,
+        bot_state,
+        bot_lock,
+        bot_thread,
     ) = start_paper_bot()
 
 else:
 
-    paper_bot_state = {
-        "status": "Paper trading disabled",
+    bot_state = {
+        "status": "DISABLED",
         "price": None,
         "signal": "NO TRADE",
         "score": 0,
         "reason": "",
         "rsi": None,
+        "macd": None,
         "balance": PAPER_BALANCE,
         "position": None,
         "last_trade": None,
         "trade_count": 0,
+        "realized_pnl": 0.0,
+        "drawdown": 0.0,
+        "last_update": None,
+        "error": None,
     }
 
-    paper_bot_lock = None
-    paper_bot_thread = None
+    bot_lock = threading.Lock()
+    bot_thread = None
+
+
+# ============================================================
+# BOT SNAPSHOT
+# ============================================================
+
+def get_bot_snapshot():
+
+    with bot_lock:
+        return dict(
+            bot_state
+        )
+
+
+snapshot = get_bot_snapshot()
 
 
 # ============================================================
@@ -738,565 +728,393 @@ else:
 with st.sidebar:
 
     st.markdown(
-        "### 🤖 Autonomous Paper Bot"
+        "## 🤖 PRO AI BOT"
     )
 
-    if PAPER_TRADING:
-
-        st.markdown(
-            "<div class='safe-box'>"
-            "✅ PAPER MODE ACTIVE<br>"
-            "No real automatic orders are sent."
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
-    else:
-
-        st.warning(
-            "Paper trading disabled."
-        )
-
-    if paper_bot_lock:
-
-        with paper_bot_lock:
-
-            bot_status = (
-                paper_bot_state[
-                    "status"
-                ]
-            )
-
-            bot_balance = (
-                paper_bot_state[
-                    "balance"
-                ]
-            )
-
-            bot_signal = (
-                paper_bot_state[
-                    "signal"
-                ]
-            )
-
-            bot_score = (
-                paper_bot_state[
-                    "score"
-                ]
-            )
-
-    else:
-
-        bot_status = (
-            paper_bot_state[
-                "status"
-            ]
-        )
-
-        bot_balance = (
-            paper_bot_state[
-                "balance"
-            ]
-        )
-
-        bot_signal = (
-            paper_bot_state[
-                "signal"
-            ]
-        )
-
-        bot_score = (
-            paper_bot_state[
-                "score"
-            ]
-        )
-
-    st.caption(
-        f"Bot: {bot_status}"
-    )
-
-    st.metric(
-        "Paper Balance",
-        f"${bot_balance:,.2f}",
-    )
-
-    st.metric(
-        "AI Signal",
-        bot_signal,
-    )
-
-    st.caption(
-        f"Signal score: {bot_score}"
+    st.markdown(
+        """
+<div class="safe-box">
+✅ AUTONOMOUS PAPER MODE<br>
+Real automatic orders are disabled.
+</div>
+""",
+        unsafe_allow_html=True,
     )
 
     st.divider()
 
     st.markdown(
-        "### 📊 Market Display"
+        "### 📡 Market Feed"
     )
 
-    st.session_state.exchange = (
-        st.selectbox(
-            "Exchange",
-            [
-                "Bybit",
-                "Binance",
-            ],
-            index=[
-                "Bybit",
-                "Binance",
-            ].index(
-                st.session_state.exchange
-            ),
-        )
-    )
-
-    st.session_state.use_testnet = (
-        st.toggle(
-            "Use Testnet for manual API",
-            value=st.session_state.use_testnet,
-        )
-    )
-
-    st.session_state.api_key = (
-        st.text_input(
-            "API Key",
-            type="password",
-            value=st.session_state.get(
-                "api_key",
-                "",
-            ),
-        )
-    )
-
-    st.session_state.api_secret = (
-        st.text_input(
-            "API Secret",
-            type="password",
-            value=st.session_state.get(
-                "api_secret",
-                "",
-            ),
-        )
+    st.success(
+        "Public UK-compatible feed"
     )
 
     st.caption(
-        "API keys are optional for market display. "
-        "The autonomous paper bot does not use them."
+        "Server-side Bybit/Binance API calls "
+        "are disabled in this paper version."
     )
 
     st.divider()
 
     st.markdown(
-        "### 🛡️ Display Risk Settings"
+        "### ⚙️ Bot Configuration"
     )
 
-    risk_pct = st.slider(
-        "Risk per trade (%)",
-        0.5,
-        5.0,
-        1.0,
-        0.5,
+    st.write(
+        f"**Bot Pair:** {PAPER_SYMBOL}"
     )
 
-    rsi_oversold = st.slider(
-        "RSI Oversold",
-        10,
-        40,
-        30,
+    st.write(
+        f"**Poll:** {POLL_SECONDS}s"
     )
 
-    rsi_overbought = st.slider(
-        "RSI Overbought",
-        60,
-        90,
-        70,
+    st.write(
+        f"**Risk:** {RISK_PCT}%"
     )
 
-
-# ============================================================
-# PUBLIC MARKET CLIENT
-# ============================================================
-
-api_key = st.session_state.get(
-    "api_key",
-    "",
-)
-
-api_secret = st.session_state.get(
-    "api_secret",
-    "",
-)
-
-client = get_client(
-    st.session_state.exchange,
-    api_key,
-    api_secret,
-    st.session_state.use_testnet,
-)
-
-
-# ============================================================
-# HEADER
-# ============================================================
-
-c_sel, c_p, c_ch, c_hi, c_lo, c_bal = (
-    st.columns(
-        [
-            1.5,
-            1,
-            1,
-            1,
-            1,
-            1.5,
-        ]
-    )
-)
-
-
-with c_sel:
-
-    selected_pair = st.selectbox(
-        "Select Crypto Pair",
-        TOP_SYMBOLS,
-        index=0,
+    st.write(
+        f"**TP:** {TP_PCT}%"
     )
 
-    environment_label = (
-        "TESTNET"
-        if st.session_state.use_testnet
-        else "PUBLIC"
+    st.write(
+        f"**SL:** {SL_PCT}%"
     )
+
+    st.write(
+        f"**Daily Loss Limit:** "
+        f"{MAX_DAILY_LOSS_PCT}%"
+    )
+
+    st.divider()
 
     st.markdown(
-        f"<span class='exch-badge'>"
-        f"{st.session_state.exchange} "
-        f"{environment_label}"
-        f"</span>",
-        unsafe_allow_html=True,
+        "### 💰 Paper Account"
+    )
+
+    st.metric(
+        "Balance",
+        f"${snapshot['balance']:,.2f}",
+    )
+
+    st.metric(
+        "Realized P&L",
+        f"${snapshot['realized_pnl']:,.2f}",
+    )
+
+    st.metric(
+        "Completed Trades",
+        snapshot["trade_count"],
     )
 
 
 # ============================================================
-# TICKER
-# ============================================================
-
-ticker = client.get_ticker(
-    selected_pair
-)
-
-last_price = 0.0
-
-if ticker:
-
-    last_price = ticker[
-        "last"
-    ]
-
-    price_change = ticker[
-        "change_pct"
-    ]
-
-    change_css = (
-        "val-green"
-        if price_change >= 0
-        else "val-red"
-    )
-
-    with c_p:
-
-        st.markdown(
-            "<div class='stat-label'>"
-            "Market Price"
-            "</div>"
-            f"<div class='stat-value {change_css}'>"
-            f"${last_price:,.2f}"
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
-    with c_ch:
-
-        st.markdown(
-            "<div class='stat-label'>"
-            "24h Change"
-            "</div>"
-            f"<div class='stat-value {change_css}'>"
-            f"{price_change:+.2f}%"
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
-    with c_hi:
-
-        st.markdown(
-            "<div class='stat-label'>"
-            "24h High"
-            "</div>"
-            "<div class='stat-value'>"
-            f"${ticker['high']:,.2f}"
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
-    with c_lo:
-
-        st.markdown(
-            "<div class='stat-label'>"
-            "24h Low"
-            "</div>"
-            "<div class='stat-value'>"
-            f"${ticker['low']:,.2f}"
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
-else:
-
-    with c_p:
-
-        st.markdown(
-            "<div class='stat-label'>"
-            "Market Price"
-            "</div>"
-            "<div class='stat-value'>"
-            "Connecting..."
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
-
-# ============================================================
-# BALANCE DISPLAY
-# ============================================================
-
-if api_key and api_secret:
-
-    live_balance = (
-        client.get_balance()
-    )
-
-    if live_balance is not None:
-
-        bal_display = (
-            f"${live_balance:,.2f} USDT"
-        )
-
-    else:
-
-        bal_display = (
-            "API unavailable"
-        )
-
-else:
-
-    live_balance = None
-
-    bal_display = (
-        f"Paper ${bot_balance:,.2f}"
-    )
-
-
-with c_bal:
-
-    st.markdown(
-        "<div class='stat-label' "
-        "style='text-align:right;'>"
-        "Account / Paper Balance"
-        "</div>"
-        "<div class='stat-value val-green' "
-        "style='text-align:right;'>"
-        f"{bal_display}"
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-
-st.divider()
-
-
-# ============================================================
-# PAPER BOT STATUS BAR
+# HERO
 # ============================================================
 
 st.markdown(
-    "### 🤖 Autonomous Paper Trading"
+    """
+<div class="hero">
+    <div class="hero-title">
+        PRO AI FUTURES TERMINAL
+    </div>
+    <div class="hero-sub">
+        Autonomous signal analysis • Risk engine •
+        Paper execution • Automatic TP/SL
+    </div>
+</div>
+""",
+    unsafe_allow_html=True,
 )
 
-paper_cols = st.columns(
+
+# ============================================================
+# MARKET SELECTION
+# ============================================================
+
+top_a, top_b = st.columns(
     [
-        1.5,
         1,
         1,
-        1,
-        2,
     ]
 )
 
-if paper_bot_lock:
+with top_a:
 
-    with paper_bot_lock:
+    selected_pair = st.selectbox(
+        "Market",
+        TOP_SYMBOLS,
+        index=(
+            TOP_SYMBOLS.index(
+                st.session_state.selected_pair
+            )
+            if st.session_state.selected_pair
+            in TOP_SYMBOLS
+            else 0
+        ),
+    )
 
-        p_status = (
-            paper_bot_state[
-                "status"
-            ]
-        )
-
-        p_signal = (
-            paper_bot_state[
-                "signal"
-            ]
-        )
-
-        p_score = (
-            paper_bot_state[
-                "score"
-            ]
-        )
-
-        p_balance = (
-            paper_bot_state[
-                "balance"
-            ]
-        )
-
-        p_position = (
-            paper_bot_state[
-                "position"
-            ]
-        )
-
-        p_reason = (
-            paper_bot_state[
-                "reason"
-            ]
-        )
-
-else:
-
-    p_status = "Disabled"
-    p_signal = "NO TRADE"
-    p_score = 0
-    p_balance = PAPER_BALANCE
-    p_position = None
-    p_reason = ""
+    st.session_state.selected_pair = (
+        selected_pair
+    )
 
 
-paper_cols[0].metric(
-    "Status",
-    p_status,
+with top_b:
+
+    display_exchange = st.selectbox(
+        "TradingView Chart",
+        [
+            "Bybit",
+            "Binance",
+            "Coinbase",
+        ],
+    )
+
+    st.session_state.display_exchange = (
+        display_exchange
+    )
+
+
+# ============================================================
+# PUBLIC TICKER
+# ============================================================
+
+ticker = get_ticker(
+    symbol=selected_pair,
+    exchange="PUBLIC",
+    api_key="",
+    api_secret="",
+    use_testnet=False,
 )
 
-paper_cols[1].metric(
-    "Signal",
-    p_signal,
+
+market_price = 0.0
+change_pct = 0.0
+high_price = 0.0
+low_price = 0.0
+volume = 0.0
+
+
+if ticker:
+
+    market_price = float(
+        ticker.get(
+            "last",
+            0,
+        )
+    )
+
+    change_pct = float(
+        ticker.get(
+            "change_pct",
+            0,
+        )
+    )
+
+    high_price = float(
+        ticker.get(
+            "high",
+            0,
+        )
+    )
+
+    low_price = float(
+        ticker.get(
+            "low",
+            0,
+        )
+    )
+
+    volume = float(
+        ticker.get(
+            "volume",
+            0,
+        )
+    )
+
+
+# ============================================================
+# MARKET METRICS
+# ============================================================
+
+m1, m2, m3, m4, m5 = st.columns(
+    5
 )
 
-paper_cols[2].metric(
-    "Score",
-    p_score,
+m1.metric(
+    selected_pair,
+    (
+        f"${market_price:,.2f}"
+        if market_price > 0
+        else "Loading..."
+    ),
 )
 
-paper_cols[3].metric(
+m2.metric(
+    "24h Change",
+    f"{change_pct:+.2f}%",
+)
+
+m3.metric(
+    "24h High",
+    (
+        f"${high_price:,.2f}"
+        if high_price > 0
+        else "—"
+    ),
+)
+
+m4.metric(
+    "24h Low",
+    (
+        f"${low_price:,.2f}"
+        if low_price > 0
+        else "—"
+    ),
+)
+
+m5.metric(
     "Paper Balance",
-    f"${p_balance:,.2f}",
+    f"${snapshot['balance']:,.2f}",
 )
-
-paper_cols[4].markdown(
-    f"**Reason:** {p_reason or 'Waiting for signal'}"
-)
-
-if p_position:
-
-    st.success(
-        f"OPEN PAPER POSITION — "
-        f"{p_position['side']} "
-        f"{p_position['symbol']} | "
-        f"Entry ${p_position['entry_price']:,.2f} | "
-        f"TP ${p_position['take_profit']:,.2f} | "
-        f"SL ${p_position['stop_loss']:,.2f}"
-    )
-
-else:
-
-    st.caption(
-        "No paper position currently open."
-    )
 
 
 st.divider()
 
 
 # ============================================================
-# RSI CALCULATION
+# AUTONOMOUS BOT STATUS
 # ============================================================
 
-klines_df = client.get_klines(
-    selected_pair,
-    15,
-    100,
+st.markdown(
+    "## 🧠 Autonomous AI Engine"
 )
 
-current_rsi = None
+s1, s2, s3, s4, s5 = st.columns(
+    [
+        1.4,
+        1,
+        1,
+        1,
+        1.4,
+    ]
+)
 
-if klines_df is not None:
+s1.metric(
+    "Bot Status",
+    snapshot["status"],
+)
 
-    rsi_series = calculate_rsi(
-        klines_df["close"]
-    )
+s2.metric(
+    "Signal",
+    snapshot["signal"],
+)
 
-    current_rsi = float(
-        rsi_series.iloc[-1]
-    )
+s3.metric(
+    "Score",
+    snapshot["score"],
+)
 
+rsi_value = snapshot.get(
+    "rsi"
+)
 
-# ============================================================
-# MAIN GRID
-# ============================================================
+s4.metric(
+    "RSI",
+    (
+        f"{float(rsi_value):.1f}"
+        if rsi_value is not None
+        else "—"
+    ),
+)
 
-col_chart, col_depth, col_exec = (
-    st.columns(
-        [
-            3.0,
-            1.2,
-            1.4,
-        ]
-    )
+s5.metric(
+    "Bot Market",
+    PAPER_SYMBOL,
 )
 
 
-# ============================================================
-# TRADINGVIEW
-# ============================================================
+reason = snapshot.get(
+    "reason"
+)
 
-with col_chart:
+if reason:
 
-    tv_prefix = (
-        "BYBIT"
-        if st.session_state.exchange
-        == "Bybit"
-        else "BINANCE"
+    st.caption(
+        f"Signal analysis: {reason}"
     )
+
+if snapshot.get(
+    "error"
+):
+
+    st.error(
+        snapshot["error"]
+    )
+
+
+# ============================================================
+# CHART + BOT PANEL
+# ============================================================
+
+chart_col, bot_col = st.columns(
+    [
+        3,
+        1.25,
+    ]
+)
+
+
+with chart_col:
+
+    # TradingView runs in the browser.
+    # It is independent from the server market feed.
+
+    if display_exchange == "Bybit":
+
+        tv_symbol = (
+            f"BYBIT:{selected_pair}"
+        )
+
+    elif display_exchange == "Binance":
+
+        tv_symbol = (
+            f"BINANCE:{selected_pair}"
+        )
+
+    else:
+
+        base = selected_pair.replace(
+            "USDT",
+            "",
+        )
+
+        tv_symbol = (
+            f"COINBASE:{base}USD"
+        )
 
     tv_widget = f"""
-    <div class="tradingview-widget-container"
-         style="height:520px;width:100%;">
+    <div
+        class="tradingview-widget-container"
+        style="height:550px;width:100%;"
+    >
 
-        <div id="tradingview_chart"
-             style="height:520px;width:100%;">
-        </div>
+        <div
+            id="tradingview_chart"
+            style="height:550px;width:100%;"
+        ></div>
 
         <script
-        type="text/javascript"
-        src="https://s3.tradingview.com/tv.js">
-        </script>
+            type="text/javascript"
+            src="https://s3.tradingview.com/tv.js"
+        ></script>
 
         <script type="text/javascript">
 
         new TradingView.widget({{
             "autosize": true,
-            "symbol": "{tv_prefix}:{selected_pair}",
+            "symbol": "{tv_symbol}",
             "interval": "15",
             "timezone": "Etc/UTC",
             "theme": "dark",
@@ -1306,7 +1124,7 @@ with col_chart:
             "hide_side_toolbar": false,
             "allow_symbol_change": true,
             "container_id": "tradingview_chart",
-            "backgroundColor": "#0d1117",
+            "backgroundColor": "#080a0d",
             "gridColor": "#161b26"
         }});
 
@@ -1317,368 +1135,240 @@ with col_chart:
 
     components.html(
         tv_widget,
-        height=525,
+        height=560,
     )
 
-    if current_rsi is not None:
 
-        rsi_css = (
-            "val-red"
-            if current_rsi
-            > rsi_overbought
-            else (
-                "val-green"
-                if current_rsi
-                < rsi_oversold
-                else ""
-            )
-        )
-
-        signal_text = (
-            "OVERBOUGHT"
-            if current_rsi
-            > rsi_overbought
-            else (
-                "OVERSOLD"
-                if current_rsi
-                < rsi_oversold
-                else "Neutral"
-            )
-        )
-
-        st.markdown(
-            "<div class='rsi-box'>"
-            "<span class='stat-label'>"
-            "RSI (14, 15m)"
-            "</span><br>"
-            f"<span class='stat-value {rsi_css}' "
-            "style='font-size:18px;'>"
-            f"{current_rsi:.1f}"
-            "</span>"
-            f" — {signal_text}"
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
-
-# ============================================================
-# ORDER BOOK DISPLAY
-# ============================================================
-
-with col_depth:
+with bot_col:
 
     st.markdown(
-        "<div class='ob-header'>"
-        "📊 Market Depth"
-        "</div>",
+        "### ⚡ AI Execution"
+    )
+
+    st.markdown(
+        """
+<div class="safe-box">
+🤖 AUTOMATIC PAPER EXECUTION<br><br>
+The bot decides whether to BUY,
+SELL or WAIT.<br><br>
+TP and SL are calculated automatically.
+</div>
+""",
         unsafe_allow_html=True,
     )
 
-    if last_price > 0:
+    st.write("")
 
-        step = (
-            last_price
-            * 0.0003
-        )
-
-        asks_df = pd.DataFrame(
-            {
-                "Price ($)": [
-                    round(
-                        last_price
-                        + (i * step),
-                        2,
-                    )
-                    for i
-                    in range(
-                        5,
-                        0,
-                        -1,
-                    )
-                ],
-                "Size": [
-                    0.35,
-                    1.12,
-                    0.08,
-                    2.45,
-                    0.91,
-                ],
-            }
-        )
-
-        bids_df = pd.DataFrame(
-            {
-                "Price ($)": [
-                    round(
-                        last_price
-                        - (i * step),
-                        2,
-                    )
-                    for i
-                    in range(
-                        1,
-                        6,
-                    )
-                ],
-                "Size": [
-                    1.45,
-                    0.62,
-                    3.12,
-                    0.85,
-                    1.10,
-                ],
-            }
-        )
-
-        st.caption(
-            "🔴 Illustrative asks"
-        )
-
-        st.dataframe(
-            asks_df,
-            width="stretch",
-            height=170,
-            hide_index=True,
-        )
-
-        st.markdown(
-            f"<div style='font-size:14px;"
-            "font-weight:bold;"
-            "color:#00c076;"
-            "text-align:center;"
-            "margin:6px 0;'>"
-            f"${last_price:,.2f}"
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
-        st.caption(
-            "🟢 Illustrative bids"
-        )
-
-        st.dataframe(
-            bids_df,
-            width="stretch",
-            height=170,
-            hide_index=True,
-        )
-
-    else:
-
-        st.info(
-            "Loading market..."
-        )
-
-
-# ============================================================
-# EXECUTION PANEL
-# ============================================================
-
-with col_exec:
-
-    st.markdown(
-        "<div class='ob-header'>"
-        "⚡ Paper Execution"
-        "</div>",
-        unsafe_allow_html=True,
+    st.metric(
+        "Configured Risk",
+        f"{RISK_PCT}%",
     )
 
-    st.success(
-        "🤖 Autonomous Paper Mode"
+    st.metric(
+        "Take Profit",
+        f"{TP_PCT}%",
+    )
+
+    st.metric(
+        "Stop Loss",
+        f"{SL_PCT}%",
+    )
+
+    st.metric(
+        "Daily Drawdown",
+        f"{snapshot['drawdown']:.2f}%",
     )
 
     st.caption(
-        "The background AI bot automatically "
-        "scans signals and opens simulated trades."
-    )
-
-    if last_price > 0:
-
-        demo_tp = (
-            last_price
-            * (
-                1
-                + PAPER_TP_PCT
-                / 100
-            )
-        )
-
-        demo_sl = (
-            last_price
-            * (
-                1
-                - PAPER_SL_PCT
-                / 100
-            )
-        )
-
-        st.metric(
-            "Market",
-            f"${last_price:,.2f}",
-        )
-
-        st.metric(
-            "Configured TP",
-            f"{PAPER_TP_PCT}%",
-        )
-
-        st.metric(
-            "Configured SL",
-            f"{PAPER_SL_PCT}%",
-        )
-
-        st.metric(
-            "Risk",
-            f"{PAPER_RISK_PCT}%",
-        )
-
-        st.caption(
-            f"Example LONG TP "
-            f"${demo_tp:,.2f} | "
-            f"SL ${demo_sl:,.2f}"
-        )
-
-    st.markdown(
-        "<div class='safe-box'>"
-        "REAL AUTO ORDERS ARE DISABLED.<br>"
-        "This stage is for paper testing only."
-        "</div>",
-        unsafe_allow_html=True,
+        "No manual BUY/SELL button is required "
+        "for the autonomous paper bot."
     )
 
 
 # ============================================================
-# BOTTOM TABS
+# CURRENT PAPER POSITION
 # ============================================================
 
 st.divider()
 
-st.subheader(
-    "📋 AI Bot Positions & Logs"
+st.markdown(
+    "## 📌 Current Paper Position"
 )
 
-tab_pos, tab_logs = (
-    st.tabs(
+position = snapshot.get(
+    "position"
+)
+
+
+if position:
+
+    pos_df = pd.DataFrame(
         [
-            "Paper Position",
-            "AI Strategy Status",
+            {
+                "Mode": "PAPER",
+                "Symbol": position.get(
+                    "symbol"
+                ),
+                "Side": position.get(
+                    "side"
+                ),
+                "Quantity": position.get(
+                    "quantity"
+                ),
+                "Entry": position.get(
+                    "entry_price"
+                ),
+                "Take Profit": position.get(
+                    "take_profit"
+                ),
+                "Stop Loss": position.get(
+                    "stop_loss"
+                ),
+                "Opened": position.get(
+                    "opened_at"
+                ),
+            }
         ]
     )
+
+    st.dataframe(
+        pos_df,
+        width="stretch",
+        hide_index=True,
+    )
+
+else:
+
+    st.info(
+        "No paper position open. "
+        "The AI is waiting for a qualifying signal."
+    )
+
+
+# ============================================================
+# ANALYSIS + LOGS
+# ============================================================
+
+tab1, tab2, tab3 = st.tabs(
+    [
+        "🧠 Signal Analysis",
+        "📊 Bot Statistics",
+        "📜 Last Trade",
+    ]
 )
 
 
-with tab_pos:
+with tab1:
 
-    if paper_bot_lock:
+    st.code(
+        f"""
+AUTONOMOUS PAPER AI
 
-        with paper_bot_lock:
+Market Feed:
+UK-compatible public market data
 
-            current_paper_position = (
-                paper_bot_state[
-                    "position"
-                ]
-            )
+Bot Symbol:
+{PAPER_SYMBOL}
 
-            latest_paper_trade = (
-                paper_bot_state[
-                    "last_trade"
-                ]
-            )
+Status:
+{snapshot.get('status')}
 
-    else:
+Signal:
+{snapshot.get('signal')}
 
-        current_paper_position = None
-        latest_paper_trade = None
+Score:
+{snapshot.get('score')}
 
-    if current_paper_position:
+RSI:
+{snapshot.get('rsi')}
 
-        pos_df = pd.DataFrame(
-            [
-                {
-                    "Mode": "PAPER",
-                    "Exchange Data": PAPER_EXCHANGE,
-                    "Symbol": current_paper_position[
-                        "symbol"
+MACD:
+{snapshot.get('macd')}
+
+Reason:
+{snapshot.get('reason')}
+
+Last Update:
+{snapshot.get('last_update')}
+
+REAL AUTO ORDERS:
+DISABLED
+""",
+        language="text",
+    )
+
+
+with tab2:
+
+    stats_df = pd.DataFrame(
+        [
+            {
+                "Starting Balance":
+                    PAPER_BALANCE,
+
+                "Current Balance":
+                    snapshot[
+                        "balance"
                     ],
-                    "Side": current_paper_position[
-                        "side"
-                    ],
-                    "Quantity": current_paper_position[
-                        "quantity"
-                    ],
-                    "Entry": current_paper_position[
-                        "entry_price"
-                    ],
-                    "Take Profit": current_paper_position[
-                        "take_profit"
-                    ],
-                    "Stop Loss": current_paper_position[
-                        "stop_loss"
-                    ],
-                }
-            ]
-        )
 
-        st.dataframe(
-            pos_df,
-            width="stretch",
-            hide_index=True,
+                "Realized P&L":
+                    snapshot[
+                        "realized_pnl"
+                    ],
+
+                "Completed Trades":
+                    snapshot[
+                        "trade_count"
+                    ],
+
+                "Risk Per Trade %":
+                    RISK_PCT,
+
+                "TP %":
+                    TP_PCT,
+
+                "SL %":
+                    SL_PCT,
+
+                "Daily Loss Limit %":
+                    MAX_DAILY_LOSS_PCT,
+            }
+        ]
+    )
+
+    st.dataframe(
+        stats_df,
+        width="stretch",
+        hide_index=True,
+    )
+
+
+with tab3:
+
+    last_trade = snapshot.get(
+        "last_trade"
+    )
+
+    if last_trade:
+
+        st.json(
+            last_trade
         )
 
     else:
 
         st.info(
-            "No autonomous paper position open."
-        )
-
-    if latest_paper_trade:
-
-        st.markdown(
-            "#### Last Closed Paper Trade"
-        )
-
-        st.json(
-            latest_paper_trade
+            "No completed paper trade yet."
         )
 
 
-with tab_logs:
+# ============================================================
+# FOOTER
+# ============================================================
 
-    if paper_bot_lock:
+st.divider()
 
-        with paper_bot_lock:
-
-            bot_snapshot = dict(
-                paper_bot_state
-            )
-
-    else:
-
-        bot_snapshot = dict(
-            paper_bot_state
-        )
-
-    st.code(
-        f"""
-Mode: PAPER TRADING
-Exchange market data: {PAPER_EXCHANGE}
-Symbol: {PAPER_SYMBOL}
-
-Bot Status: {bot_snapshot.get('status')}
-Signal: {bot_snapshot.get('signal')}
-Signal Score: {bot_snapshot.get('score')}
-RSI: {bot_snapshot.get('rsi')}
-Signal Reason: {bot_snapshot.get('reason')}
-
-Paper Balance: ${bot_snapshot.get('balance', 0):,.2f}
-Completed Trades: {bot_snapshot.get('trade_count', 0)}
-
-Risk per Trade: {PAPER_RISK_PCT}%
-Take Profit: {PAPER_TP_PCT}%
-Stop Loss: {PAPER_SL_PCT}%
-Daily Loss Limit: {MAX_DAILY_LOSS_PCT}%
-
-REAL AUTOMATIC ORDERS: DISABLED
-""",
-        language="text",
-    )
+st.caption(
+    "PRO AI TERMINAL • Autonomous Paper Trading • "
+    "Public market data • Real automatic orders disabled"
+)
