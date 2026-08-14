@@ -1,21 +1,41 @@
 """
 bot_worker.py
 
-Autonomous PAPER TRADING worker.
+MULTI-MARKET AUTONOMOUS PAPER TRADING WORKER
+
+Scans:
+    BTCUSDT
+    ETHUSDT
+    SOLUSDT
+    XRPUSDT
+    ADAUSDT
+    DOGEUSDT
+    AVAXUSDT
+    LINKUSDT
+    DOTUSDT
+    NEARUSDT
+    SUIUSDT
 
 Flow:
-Market Data
-    ↓
-Signal Engine
-    ↓
-Risk Manager
-    ↓
-Paper Trader
-    ↓
-Automatic simulated TP / SL
+    Scan all markets
+        ↓
+    Signal engine
+        ↓
+    Rank confirmed BUY/SELL setups
+        ↓
+    Select strongest setup
+        ↓
+    Risk manager
+        ↓
+    Paper trade
+        ↓
+    Automatic simulated TP / SL
 
 IMPORTANT:
-This version does NOT send real orders to Binance or Bybit.
+- PAPER TRADING ONLY
+- NO REAL ORDERS
+- Public UK-compatible market data
+- One open position at a time with the current PaperTrader
 """
 
 import os
@@ -24,60 +44,134 @@ from datetime import datetime, timezone
 
 from market_data import get_candles
 from signal_engine import generate_signal
-from risk_manager import calculate_trade_plan, validate_trade_plan
+from risk_manager import (
+    calculate_trade_plan,
+    validate_trade_plan,
+)
 from paper_trader import PaperTrader
 
 
 # ============================================================
-# CONFIGURATION
+# CONFIG
 # ============================================================
 
-EXCHANGE = os.environ.get("EXCHANGE", "Bybit")
-
-SYMBOL = os.environ.get("SYMBOL", "BTCUSDT")
-
 PAPER_TRADING = (
-    os.environ.get("PAPER_TRADING", "true").lower() == "true"
+    os.environ.get(
+        "PAPER_TRADING",
+        "true",
+    ).lower()
+    == "true"
 )
 
 PAPER_BALANCE = float(
-    os.environ.get("PAPER_BALANCE", "10000")
+    os.environ.get(
+        "PAPER_BALANCE",
+        "10000",
+    )
 )
 
 RISK_PCT = float(
-    os.environ.get("RISK_PCT", "1")
+    os.environ.get(
+        "RISK_PCT",
+        "1",
+    )
 )
 
 SL_PCT = float(
-    os.environ.get("SL_PCT", "1")
+    os.environ.get(
+        "SL_PCT",
+        "1",
+    )
 )
 
 TP_PCT = float(
-    os.environ.get("TP_PCT", "2")
+    os.environ.get(
+        "TP_PCT",
+        "2",
+    )
 )
 
 POLL_SECONDS = int(
-    os.environ.get("POLL_SECONDS", "60")
+    os.environ.get(
+        "POLL_SECONDS",
+        "60",
+    )
 )
 
 MAX_DAILY_LOSS_PCT = float(
-    os.environ.get("MAX_DAILY_LOSS_PCT", "5")
+    os.environ.get(
+        "MAX_DAILY_LOSS_PCT",
+        "5",
+    )
+)
+
+TIMEFRAME_MINUTES = int(
+    os.environ.get(
+        "TIMEFRAME_MINUTES",
+        "15",
+    )
+)
+
+CANDLE_LIMIT = int(
+    os.environ.get(
+        "CANDLE_LIMIT",
+        "100",
+    )
 )
 
 
 # ============================================================
-# SAFETY
+# MARKETS
+# ============================================================
+
+DEFAULT_MARKETS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "ADAUSDT",
+    "DOGEUSDT",
+    "AVAXUSDT",
+    "LINKUSDT",
+    "DOTUSDT",
+    "NEARUSDT",
+    "SUIUSDT",
+]
+
+
+raw_symbols = os.environ.get(
+    "SYMBOLS",
+    "",
+).strip()
+
+
+if raw_symbols:
+
+    MARKETS = [
+        symbol.strip().upper()
+        for symbol in raw_symbols.split(",")
+        if symbol.strip()
+    ]
+
+else:
+
+    MARKETS = DEFAULT_MARKETS
+
+
+# ============================================================
+# SAFETY LOCK
 # ============================================================
 
 if not PAPER_TRADING:
+
     raise RuntimeError(
-        "Safety lock: this worker currently supports "
+        "Safety lock: this worker supports "
         "PAPER_TRADING=true only."
     )
 
 
 # ============================================================
-# PAPER TRADER
+# PAPER ACCOUNT
 # ============================================================
 
 paper = PaperTrader(
@@ -99,13 +193,14 @@ _trading_paused = False
 # ============================================================
 
 def log(message):
-    timestamp = datetime.now(
+
+    now = datetime.now(
         timezone.utc
     ).isoformat()
 
     print(
-        f"[{timestamp}] {message}",
-        flush=True
+        f"[{now}] {message}",
+        flush=True,
     )
 
 
@@ -114,6 +209,7 @@ def log(message):
 # ============================================================
 
 def check_circuit_breaker(balance):
+
     global _day_start_balance
     global _day_start_date
     global _trading_paused
@@ -129,30 +225,40 @@ def check_circuit_breaker(balance):
         _trading_paused = False
 
         log(
-            f"New trading day. "
-            f"Starting paper balance: {balance:.2f}"
+            "NEW TRADING DAY | "
+            f"Starting balance="
+            f"{balance:.2f}"
         )
 
         return
 
     if _day_start_balance <= 0:
+
         return
 
     drawdown_pct = (
-        (_day_start_balance - balance)
+        (
+            _day_start_balance
+            - balance
+        )
         / _day_start_balance
         * 100
     )
 
-    if drawdown_pct >= MAX_DAILY_LOSS_PCT:
+    if (
+        drawdown_pct
+        >= MAX_DAILY_LOSS_PCT
+    ):
 
         if not _trading_paused:
 
             _trading_paused = True
 
             log(
-                "CIRCUIT BREAKER ACTIVATED | "
-                f"Daily loss={drawdown_pct:.2f}%"
+                "CIRCUIT BREAKER | "
+                f"Daily loss="
+                f"{drawdown_pct:.2f}% | "
+                "New trades paused."
             )
 
 
@@ -160,26 +266,454 @@ def check_circuit_breaker(balance):
 # MARKET DATA
 # ============================================================
 
-def get_market_candles():
+def get_market_candles(symbol):
 
     return get_candles(
-        exchange=EXCHANGE,
-        symbol=SYMBOL,
-        timeframe_minutes=15,
-        limit=100,
-
-        # No private API credentials required
-        # for public market-data requests.
+        exchange="PUBLIC",
+        symbol=symbol,
+        timeframe_minutes=TIMEFRAME_MINUTES,
+        limit=CANDLE_LIMIT,
         api_key="",
         api_secret="",
-
-        # Use public exchange market data.
         use_testnet=False,
     )
 
 
 # ============================================================
-# MAIN TRADING CYCLE
+# SCAN ONE MARKET
+# ============================================================
+
+def analyse_market(symbol):
+
+    try:
+
+        candles = get_market_candles(
+            symbol
+        )
+
+        if candles is None:
+
+            return {
+                "symbol": symbol,
+                "valid": False,
+                "reason": (
+                    "No market data"
+                ),
+            }
+
+        if len(candles) < 50:
+
+            return {
+                "symbol": symbol,
+                "valid": False,
+                "reason": (
+                    "Not enough candles"
+                ),
+            }
+
+        current_price = float(
+            candles["close"].iloc[-1]
+        )
+
+        signal_data = generate_signal(
+            candles
+        )
+
+        signal = signal_data.get(
+            "signal",
+            "NO TRADE",
+        )
+
+        score = signal_data.get(
+            "score",
+            0,
+        )
+
+        rsi = signal_data.get(
+            "rsi",
+            None,
+        )
+
+        macd = signal_data.get(
+            "macd",
+            None,
+        )
+
+        reason = signal_data.get(
+            "reason",
+            "",
+        )
+
+        return {
+            "symbol": symbol,
+            "valid": True,
+            "price": current_price,
+            "signal": signal,
+            "score": score,
+            "rsi": rsi,
+            "macd": macd,
+            "reason": reason,
+        }
+
+    except Exception as error:
+
+        return {
+            "symbol": symbol,
+            "valid": False,
+            "reason": str(error),
+        }
+
+
+# ============================================================
+# SCAN ALL MARKETS
+# ============================================================
+
+def scan_all_markets():
+
+    results = []
+
+    log(
+        "========================================"
+    )
+
+    log(
+        f"SCANNING {len(MARKETS)} MARKETS"
+    )
+
+    log(
+        "========================================"
+    )
+
+    for symbol in MARKETS:
+
+        result = analyse_market(
+            symbol
+        )
+
+        results.append(
+            result
+        )
+
+        if not result.get(
+            "valid"
+        ):
+
+            log(
+                f"{symbol} | "
+                f"DATA ERROR | "
+                f"{result.get('reason')}"
+            )
+
+            continue
+
+        rsi = result.get(
+            "rsi"
+        )
+
+        rsi_text = (
+            f"{float(rsi):.1f}"
+            if rsi is not None
+            else "N/A"
+        )
+
+        log(
+            f"{symbol} | "
+            f"Price="
+            f"{result['price']:.4f} | "
+            f"Signal="
+            f"{result['signal']} | "
+            f"Score="
+            f"{result['score']} | "
+            f"RSI="
+            f"{rsi_text} | "
+            f"{result['reason']}"
+        )
+
+    return results
+
+
+# ============================================================
+# SELECT STRONGEST CONFIRMED SIGNAL
+# ============================================================
+
+def select_best_setup(results):
+
+    confirmed = []
+
+    for result in results:
+
+        if not result.get(
+            "valid"
+        ):
+
+            continue
+
+        signal = result.get(
+            "signal"
+        )
+
+        if signal not in (
+            "BUY",
+            "SELL",
+        ):
+
+            continue
+
+        try:
+
+            score = float(
+                result.get(
+                    "score",
+                    0,
+                )
+            )
+
+        except Exception:
+
+            score = 0.0
+
+        result[
+            "absolute_score"
+        ] = abs(
+            score
+        )
+
+        confirmed.append(
+            result
+        )
+
+    if not confirmed:
+
+        return None
+
+    confirmed.sort(
+        key=lambda item: (
+            item[
+                "absolute_score"
+            ]
+        ),
+        reverse=True,
+    )
+
+    return confirmed[0]
+
+
+# ============================================================
+# MONITOR CURRENT POSITION
+# ============================================================
+
+def monitor_position():
+
+    position = paper.get_position()
+
+    if not position:
+
+        return False
+
+    symbol = position.get(
+        "symbol"
+    )
+
+    if not symbol:
+
+        log(
+            "Open position has no symbol."
+        )
+
+        return True
+
+    candles = get_market_candles(
+        symbol
+    )
+
+    if (
+        candles is None
+        or len(candles) == 0
+    ):
+
+        log(
+            f"{symbol} | "
+            "Could not update "
+            "open position price."
+        )
+
+        return True
+
+    current_price = float(
+        candles["close"].iloc[-1]
+    )
+
+    result = paper.update_price(
+        current_price
+    )
+
+    if (
+        result
+        and result.get(
+            "status"
+        )
+        == "CLOSED"
+    ):
+
+        log(
+            "PAPER TRADE CLOSED | "
+            f"Symbol="
+            f"{symbol} | "
+            f"Side="
+            f"{result.get('side')} | "
+            f"Entry="
+            f"{result.get('entry_price')} | "
+            f"Exit="
+            f"{result.get('exit_price')} | "
+            f"PnL="
+            f"{result.get('pnl')} | "
+            f"Reason="
+            f"{result.get('reason')} | "
+            f"Balance="
+            f"{result.get('balance')}"
+        )
+
+        return False
+
+    current_position = (
+        paper.get_position()
+    )
+
+    if current_position:
+
+        log(
+            "POSITION OPEN | "
+            f"{symbol} | "
+            f"Side="
+            f"{current_position.get('side')} | "
+            f"Entry="
+            f"{current_position.get('entry_price')} | "
+            f"Current="
+            f"{current_price:.4f} | "
+            f"TP="
+            f"{current_position.get('take_profit')} | "
+            f"SL="
+            f"{current_position.get('stop_loss')}"
+        )
+
+    return True
+
+
+# ============================================================
+# OPEN BEST PAPER TRADE
+# ============================================================
+
+def open_best_trade(
+    setup,
+    balance,
+):
+
+    symbol = setup[
+        "symbol"
+    ]
+
+    signal = setup[
+        "signal"
+    ]
+
+    entry_price = float(
+        setup[
+            "price"
+        ]
+    )
+
+    score = setup.get(
+        "score",
+        0,
+    )
+
+    log(
+        "BEST SETUP FOUND | "
+        f"{symbol} | "
+        f"Signal="
+        f"{signal} | "
+        f"Score="
+        f"{score} | "
+        f"Price="
+        f"{entry_price:.4f}"
+    )
+
+    plan = calculate_trade_plan(
+        balance=balance,
+        entry_price=entry_price,
+        signal=signal,
+        risk_percent=RISK_PCT,
+        stop_loss_percent=SL_PCT,
+        take_profit_percent=TP_PCT,
+    )
+
+    if not validate_trade_plan(
+        plan
+    ):
+
+        log(
+            "TRADE REJECTED BY "
+            "RISK MANAGER | "
+            f"{symbol} | "
+            f"{plan}"
+        )
+
+        return
+
+    result = paper.open_trade(
+        symbol=symbol,
+        signal=signal,
+        entry_price=entry_price,
+        quantity=plan[
+            "quantity"
+        ],
+        take_profit=plan[
+            "take_profit"
+        ],
+        stop_loss=plan[
+            "stop_loss"
+        ],
+    )
+
+    if (
+        result.get(
+            "status"
+        )
+        == "EXECUTED"
+    ):
+
+        position = result[
+            "position"
+        ]
+
+        log(
+            "PAPER TRADE OPENED | "
+            f"{symbol} | "
+            f"Side="
+            f"{position['side']} | "
+            f"Entry="
+            f"{position['entry_price']:.4f} | "
+            f"Qty="
+            f"{position['quantity']:.6f} | "
+            f"TP="
+            f"{position['take_profit']:.4f} | "
+            f"SL="
+            f"{position['stop_loss']:.4f} | "
+            f"Score="
+            f"{score}"
+        )
+
+    else:
+
+        log(
+            "PAPER TRADE SKIPPED | "
+            f"{symbol} | "
+            f"{result}"
+        )
+
+
+# ============================================================
+# ONE FULL TRADING CYCLE
 # ============================================================
 
 def run_once():
@@ -188,197 +722,70 @@ def run_once():
 
     balance = paper.get_balance()
 
-    check_circuit_breaker(balance)
-
-    # --------------------------------------------------------
-    # Market candles
-    # --------------------------------------------------------
-
-    candles = get_market_candles()
-
-    if candles is None:
-
-        log(
-            "Could not fetch market candles."
-        )
-
-        return
-
-    if len(candles) < 50:
-
-        log(
-            "Not enough candles for analysis."
-        )
-
-        return
-
-    current_price = float(
-        candles["close"].iloc[-1]
+    check_circuit_breaker(
+        balance
     )
 
     # --------------------------------------------------------
-    # Monitor currently open PAPER position
+    # FIRST MANAGE EXISTING TRADE
     # --------------------------------------------------------
 
-    existing_position = paper.get_position()
+    if paper.get_position():
 
-    if existing_position:
-
-        result = paper.update_price(
-            current_price
-        )
-
-        if result:
-
-            status = result.get("status")
-
-            if status == "CLOSED":
-
-                log(
-                    "PAPER TRADE CLOSED | "
-                    f"Side={result.get('side')} | "
-                    f"Entry={result.get('entry_price'):.4f} | "
-                    f"Exit={result.get('exit_price'):.4f} | "
-                    f"PnL={result.get('pnl'):.2f} | "
-                    f"Reason={result.get('reason')} | "
-                    f"Balance={result.get('balance'):.2f}"
-                )
-
-            else:
-
-                log(
-                    "PAPER POSITION OPEN | "
-                    f"{existing_position['side']} | "
-                    f"Entry={existing_position['entry_price']:.4f} | "
-                    f"Current={current_price:.4f} | "
-                    f"TP={existing_position['take_profit']:.4f} | "
-                    f"SL={existing_position['stop_loss']:.4f}"
-                )
+        monitor_position()
 
         return
 
     # --------------------------------------------------------
-    # Stop new trades if daily loss breaker is active
+    # DAILY LOSS PROTECTION
     # --------------------------------------------------------
 
     if _trading_paused:
 
         log(
-            "Paper trading paused by daily loss limit."
+            "Trading paused by "
+            "daily loss circuit breaker."
         )
 
         return
 
     # --------------------------------------------------------
-    # Generate trading signal
+    # SCAN ALL MARKETS
     # --------------------------------------------------------
 
-    signal_data = generate_signal(
-        candles
+    results = scan_all_markets()
+
+    # --------------------------------------------------------
+    # SELECT BEST CONFIRMED SETUP
+    # --------------------------------------------------------
+
+    best_setup = (
+        select_best_setup(
+            results
+        )
     )
 
-    signal = signal_data.get(
-        "signal",
-        "NO TRADE"
-    )
-
-    score = signal_data.get(
-        "score",
-        0
-    )
-
-    rsi = signal_data.get(
-        "rsi",
-        0
-    )
-
-    reason = signal_data.get(
-        "reason",
-        ""
-    )
-
-    log(
-        f"[PAPER] [{EXCHANGE}] "
-        f"{SYMBOL} | "
-        f"Price={current_price:.4f} | "
-        f"Signal={signal} | "
-        f"Score={score} | "
-        f"RSI={rsi:.2f} | "
-        f"Balance={balance:.2f}"
-    )
-
-    log(
-        f"Signal reason: {reason}"
-    )
-
-    if signal not in (
-        "BUY",
-        "SELL",
-    ):
+    if best_setup is None:
 
         log(
-            "No strong signal. Waiting..."
+            "NO QUALIFYING TRADE | "
+            "All markets scanned."
         )
 
         return
 
     # --------------------------------------------------------
-    # Risk management
+    # OPEN STRONGEST PAPER SETUP
     # --------------------------------------------------------
 
-    plan = calculate_trade_plan(
-        balance=balance,
-        entry_price=current_price,
-        signal=signal,
-        risk_percent=RISK_PCT,
-        stop_loss_percent=SL_PCT,
-        take_profit_percent=TP_PCT,
+    open_best_trade(
+        best_setup,
+        balance,
     )
-
-    if not validate_trade_plan(plan):
-
-        log(
-            f"Trade plan rejected: {plan}"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Open PAPER trade
-    # --------------------------------------------------------
-
-    result = paper.open_trade(
-        symbol=SYMBOL,
-        signal=signal,
-        entry_price=current_price,
-        quantity=plan["quantity"],
-        take_profit=plan["take_profit"],
-        stop_loss=plan["stop_loss"],
-    )
-
-    if result.get("status") == "EXECUTED":
-
-        position = result["position"]
-
-        log(
-            "PAPER TRADE OPENED | "
-            f"{position['side']} | "
-            f"{SYMBOL} | "
-            f"Entry={position['entry_price']:.4f} | "
-            f"Qty={position['quantity']:.6f} | "
-            f"TP={position['take_profit']:.4f} | "
-            f"SL={position['stop_loss']:.4f}"
-        )
-
-    else:
-
-        log(
-            f"Paper trade skipped: {result}"
-        )
 
 
 # ============================================================
-# WORKER START
+# MAIN WORKER
 # ============================================================
 
 def main():
@@ -388,37 +795,61 @@ def main():
     )
 
     log(
-        "AUTONOMOUS PAPER TRADING BOT STARTING"
+        "PRO AI MULTI-MARKET "
+        "PAPER BOT STARTING"
     )
 
     log(
-        f"Exchange market data: {EXCHANGE}"
+        "========================================"
     )
 
     log(
-        f"Symbol: {SYMBOL}"
+        f"Markets: "
+        f"{', '.join(MARKETS)}"
     )
 
     log(
-        f"Starting paper balance: "
-        f"{PAPER_BALANCE:.2f} USDT"
+        f"Total markets: "
+        f"{len(MARKETS)}"
     )
 
     log(
-        f"Risk per trade: {RISK_PCT}%"
+        f"Timeframe: "
+        f"{TIMEFRAME_MINUTES}m"
     )
 
     log(
-        f"Take Profit: {TP_PCT}%"
+        f"Starting balance: "
+        f"${PAPER_BALANCE:.2f}"
     )
 
     log(
-        f"Stop Loss: {SL_PCT}%"
+        f"Risk per trade: "
+        f"{RISK_PCT}%"
     )
 
     log(
-        f"Polling interval: "
-        f"{POLL_SECONDS} seconds"
+        f"Take Profit: "
+        f"{TP_PCT}%"
+    )
+
+    log(
+        f"Stop Loss: "
+        f"{SL_PCT}%"
+    )
+
+    log(
+        f"Daily loss limit: "
+        f"{MAX_DAILY_LOSS_PCT}%"
+    )
+
+    log(
+        f"Scan interval: "
+        f"{POLL_SECONDS}s"
+    )
+
+    log(
+        "MAX OPEN POSITIONS: 1"
     )
 
     log(
@@ -446,7 +877,7 @@ def main():
         except Exception as error:
 
             log(
-                f"Unhandled worker error: "
+                "UNHANDLED WORKER ERROR | "
                 f"{error}"
             )
 
@@ -456,4 +887,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()
