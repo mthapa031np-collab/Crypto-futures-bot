@@ -1,5 +1,5 @@
 # Stable autonomous paper-trading logic preserved.
-# Quant terminal UI - corrected HTML rendering.
+# Quant terminal UI - HTML rendering fixed.
 
 """
 app.py
@@ -45,13 +45,16 @@ st.set_page_config(
 
 
 # ============================================================
-# HELPER FOR SAFE HTML RENDERING
+# HTML HELPER
 # ============================================================
 
 def html(content):
-    st.markdown(
-        textwrap.dedent(content).strip(),
-        unsafe_allow_html=True,
+    """
+    Render HTML using Streamlit native HTML renderer.
+    This prevents <div> / <span> code from appearing as text.
+    """
+    st.html(
+        textwrap.dedent(content).strip()
     )
 
 
@@ -142,7 +145,7 @@ if "display_exchange" not in st.session_state:
 
 
 # ============================================================
-# TERMINAL STYLE
+# CSS
 # ============================================================
 
 html(
@@ -571,7 +574,6 @@ def paper_bot_loop(state, lock):
 
             balance = trader.get_balance()
 
-            # Daily reset
             if day_start_date != today:
 
                 day_start_date = today
@@ -580,7 +582,6 @@ def paper_bot_loop(state, lock):
 
             drawdown_pct = 0.0
 
-            # Circuit breaker
             if day_start_balance > 0:
 
                 drawdown_pct = (
@@ -595,7 +596,6 @@ def paper_bot_loop(state, lock):
                 if drawdown_pct >= MAX_DAILY_LOSS_PCT:
                     trading_paused = True
 
-            # Public UK-friendly candles
             candles = get_candles(
                 exchange="PUBLIC",
                 symbol=PAPER_SYMBOL,
@@ -612,21 +612,25 @@ def paper_bot_loop(state, lock):
             ):
 
                 with lock:
+
                     state["status"] = (
                         "WAITING FOR MARKET DATA"
                     )
+
                     state["last_update"] = (
                         now_utc.isoformat()
                     )
 
-                time.sleep(POLL_SECONDS)
+                time.sleep(
+                    POLL_SECONDS
+                )
+
                 continue
 
             current_price = float(
                 candles["close"].iloc[-1]
             )
 
-            # Existing position management
             existing_position = (
                 trader.get_position()
             )
@@ -701,10 +705,12 @@ def paper_bot_loop(state, lock):
                             "POSITION OPEN"
                         )
 
-                time.sleep(POLL_SECONDS)
+                time.sleep(
+                    POLL_SECONDS
+                )
+
                 continue
 
-            # Daily risk block
             if trading_paused:
 
                 with lock:
@@ -725,10 +731,12 @@ def paper_bot_loop(state, lock):
                         drawdown_pct
                     )
 
-                time.sleep(POLL_SECONDS)
+                time.sleep(
+                    POLL_SECONDS
+                )
+
                 continue
 
-            # Signal engine
             signal_data = generate_signal(
                 candles
             )
@@ -764,21 +772,33 @@ def paper_bot_loop(state, lock):
                     current_price
                 )
 
-                state["signal"] = signal
+                state["signal"] = (
+                    signal
+                )
 
-                state["score"] = score
+                state["score"] = (
+                    score
+                )
 
-                state["reason"] = reason
+                state["reason"] = (
+                    reason
+                )
 
-                state["rsi"] = rsi
+                state["rsi"] = (
+                    rsi
+                )
 
-                state["macd"] = macd
+                state["macd"] = (
+                    macd
+                )
 
                 state["balance"] = (
                     trader.get_balance()
                 )
 
-                state["position"] = None
+                state["position"] = (
+                    None
+                )
 
                 state["drawdown"] = (
                     drawdown_pct
@@ -788,7 +808,6 @@ def paper_bot_loop(state, lock):
                     now_utc.isoformat()
                 )
 
-            # Wait
             if signal not in (
                 "BUY",
                 "SELL",
@@ -799,10 +818,12 @@ def paper_bot_loop(state, lock):
                         "SCANNING MARKET"
                     )
 
-                time.sleep(POLL_SECONDS)
+                time.sleep(
+                    POLL_SECONDS
+                )
+
                 continue
 
-            # Risk plan
             plan = calculate_trade_plan(
                 balance=trader.get_balance(),
                 entry_price=current_price,
@@ -812,17 +833,21 @@ def paper_bot_loop(state, lock):
                 take_profit_percent=TP_PCT,
             )
 
-            if not validate_trade_plan(plan):
+            if not validate_trade_plan(
+                plan
+            ):
 
                 with lock:
                     state["status"] = (
                         "TRADE REJECTED BY RISK MANAGER"
                     )
 
-                time.sleep(POLL_SECONDS)
+                time.sleep(
+                    POLL_SECONDS
+                )
+
                 continue
 
-            # Open paper trade
             result = trader.open_trade(
                 symbol=PAPER_SYMBOL,
                 signal=signal,
@@ -871,17 +896,19 @@ def paper_bot_loop(state, lock):
                     "ERROR"
                 )
 
-                state["error"] = str(
-                    error
+                state["error"] = (
+                    str(error)
                 )
 
             print(
-                f"[PAPER BOT ERROR] "
+                "[PAPER BOT ERROR] "
                 f"{error}",
                 flush=True,
             )
 
-        time.sleep(POLL_SECONDS)
+        time.sleep(
+            POLL_SECONDS
+        )
 
 
 # ============================================================
@@ -969,6 +996,7 @@ else:
 def get_bot_snapshot():
 
     with bot_lock:
+
         return dict(
             bot_state
         )
@@ -983,7 +1011,9 @@ snapshot = get_bot_snapshot()
 
 utc_now = datetime.now(
     timezone.utc
-).strftime("%H:%M:%S UTC")
+).strftime(
+    "%H:%M:%S UTC"
+)
 
 
 html(
@@ -1018,15 +1048,25 @@ html(
 html(
     f"""
     <div class="terminal-strip">
+
         MARKET FEED: UK PUBLIC DATA
+
         &nbsp;&nbsp;|&nbsp;&nbsp;
+
         BOT: {PAPER_SYMBOL}
+
         &nbsp;&nbsp;|&nbsp;&nbsp;
+
         MODE: PAPER
+
         &nbsp;&nbsp;|&nbsp;&nbsp;
+
         SCAN: {POLL_SECONDS}s
+
         &nbsp;&nbsp;|&nbsp;&nbsp;
+
         REAL EXECUTION: OFF
+
     </div>
     """
 )
@@ -1166,7 +1206,7 @@ if ticker:
 
 
 # ============================================================
-# MAIN COMMAND CENTER
+# MAIN LAYOUT
 # ============================================================
 
 account_col, chart_col, execution_col = (
@@ -1181,7 +1221,7 @@ account_col, chart_col, execution_col = (
 
 
 # ============================================================
-# ACCOUNT
+# ACCOUNT PANEL
 # ============================================================
 
 with account_col:
@@ -1261,7 +1301,7 @@ with account_col:
 
 
 # ============================================================
-# CHART
+# CHART PANEL
 # ============================================================
 
 with chart_col:
@@ -1283,19 +1323,29 @@ with chart_col:
     html(
         f"""
         <div class="terminal-strip">
+
             {selected_pair}
+
             &nbsp;&nbsp;
+
             <span class="{price_css}">
                 ${market_price:,.2f}
             </span>
+
             &nbsp;&nbsp;
+
             <span class="{price_css}">
                 {change_pct:+.2f}%
             </span>
+
             &nbsp;&nbsp;
+
             HIGH ${high_price:,.2f}
+
             &nbsp;&nbsp;
+
             LOW ${low_price:,.2f}
+
         </div>
         """
     )
@@ -1373,7 +1423,7 @@ with chart_col:
 
 
 # ============================================================
-# EXECUTION
+# EXECUTION PANEL
 # ============================================================
 
 with execution_col:
@@ -1523,10 +1573,16 @@ rsi_state = "Neutral"
 if rsi_value is not None:
 
     if float(rsi_value) >= 70:
-        rsi_state = "Overbought"
+
+        rsi_state = (
+            "Overbought"
+        )
 
     elif float(rsi_value) <= 30:
-        rsi_state = "Oversold"
+
+        rsi_state = (
+            "Oversold"
+        )
 
 
 reason_text = snapshot.get(
@@ -1537,15 +1593,21 @@ reason_text = snapshot.get(
 
 if "Bullish trend" in reason_text:
 
-    trend_state = "Bullish"
+    trend_state = (
+        "Bullish"
+    )
 
 elif "Bearish trend" in reason_text:
 
-    trend_state = "Bearish"
+    trend_state = (
+        "Bearish"
+    )
 
 else:
 
-    trend_state = "Neutral"
+    trend_state = (
+        "Neutral"
+    )
 
 
 html(
@@ -1659,7 +1721,7 @@ html(
 
 
 # ============================================================
-# AI MARKET INTELLIGENCE NETWORK
+# AI INTELLIGENCE NETWORK
 # ============================================================
 
 html(
@@ -1915,7 +1977,7 @@ if last_trade:
 
 
 # ============================================================
-# BOT ERROR
+# ERRORS
 # ============================================================
 
 if snapshot.get(
@@ -1937,13 +1999,21 @@ html(
         class="terminal-strip"
         style="margin-top:8px;"
     >
+
         PRO AI QUANT TERMINAL
+
         &nbsp;&nbsp;•&nbsp;&nbsp;
+
         AUTONOMOUS PAPER TRADING
+
         &nbsp;&nbsp;•&nbsp;&nbsp;
+
         UK PUBLIC MARKET DATA
+
         &nbsp;&nbsp;•&nbsp;&nbsp;
+
         REAL ORDER EXECUTION DISABLED
+
     </div>
     """
 )
