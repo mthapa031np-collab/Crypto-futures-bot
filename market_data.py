@@ -1,16 +1,19 @@
 """
 market_data.py
 
-UK-friendly public market data provider.
+PRO AI QUANT TERMINAL V2
 
-Primary source:
-    Coinbase Exchange public REST market data
+UK-friendly Coinbase public market-data provider.
 
-No API key is required for candles/ticker data.
+Features:
+- Public ticker
+- Public OHLCV candles
+- 1m / 5m / 15m / 1h / 6h / 1d native Coinbase candles
+- Proper synthetic 4H candles built from 1H candles
+- Compatible with app.py, scanner.py, strategy_engine.py,
+  trade_engine.py and bot_worker.py
 
-Used by:
-    app.py
-    bot_worker.py
+No private API key required.
 """
 
 import time
@@ -19,6 +22,11 @@ import pandas as pd
 
 
 COINBASE_BASE = "https://api.exchange.coinbase.com"
+
+
+# ============================================================
+# SYMBOL MAPPING
+# ============================================================
 
 SYMBOL_MAP = {
     "BTCUSDT": "BTC-USD",
@@ -34,6 +42,8 @@ SYMBOL_MAP = {
     "SUIUSDT": "SUI-USD",
 }
 
+
+# Coinbase Exchange native granularities.
 SUPPORTED_GRANULARITIES = {
     1: 60,
     5: 300,
@@ -44,32 +54,305 @@ SUPPORTED_GRANULARITIES = {
 }
 
 
+HEADERS = {
+    "User-Agent": "pro-ai-quant-terminal/2.0",
+    "Accept": "application/json",
+}
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
 def _product_id(symbol):
-    symbol = str(symbol).upper().replace("/", "").replace("-", "")
+
+    symbol = (
+        str(symbol)
+        .upper()
+        .replace("/", "")
+        .replace("-", "")
+        .strip()
+    )
 
     if symbol in SYMBOL_MAP:
         return SYMBOL_MAP[symbol]
 
     if symbol.endswith("USDT"):
+
         base = symbol[:-4]
+
         return f"{base}-USD"
 
     if symbol.endswith("USD"):
+
         base = symbol[:-3]
+
         return f"{base}-USD"
 
-    raise ValueError(f"Unsupported symbol: {symbol}")
+    raise ValueError(
+        f"Unsupported symbol: {symbol}"
+    )
 
 
-def _granularity(timeframe_minutes):
-    timeframe_minutes = int(timeframe_minutes)
+def _native_granularity(
+    timeframe_minutes,
+):
 
-    if timeframe_minutes in SUPPORTED_GRANULARITIES:
-        return SUPPORTED_GRANULARITIES[timeframe_minutes]
+    timeframe_minutes = int(
+        timeframe_minutes
+    )
 
-    # Safe fallback
-    return 900
+    return SUPPORTED_GRANULARITIES.get(
+        timeframe_minutes
+    )
 
+
+def _request_coinbase_candles(
+    product,
+    granularity_seconds,
+    limit,
+):
+
+    limit = max(
+        10,
+        min(
+            int(limit),
+            300,
+        ),
+    )
+
+    now = int(
+        time.time()
+    )
+
+    start = (
+        now
+        - (
+            granularity_seconds
+            * limit
+        )
+    )
+
+    url = (
+        f"{COINBASE_BASE}"
+        f"/products/{product}/candles"
+    )
+
+    params = {
+        "granularity":
+            granularity_seconds,
+
+        "start":
+            pd.Timestamp(
+                start,
+                unit="s",
+                tz="UTC",
+            ).isoformat(),
+
+        "end":
+            pd.Timestamp(
+                now,
+                unit="s",
+                tz="UTC",
+            ).isoformat(),
+    }
+
+    response = requests.get(
+        url,
+        params=params,
+        headers=HEADERS,
+        timeout=15,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if not data:
+        return None
+
+    rows = []
+
+    for candle in data:
+
+        if (
+            not isinstance(
+                candle,
+                list,
+            )
+            or len(candle) < 6
+        ):
+            continue
+
+        rows.append(
+            {
+                "timestamp":
+                    int(
+                        candle[0]
+                    )
+                    * 1000,
+
+                "low":
+                    float(
+                        candle[1]
+                    ),
+
+                "high":
+                    float(
+                        candle[2]
+                    ),
+
+                "open":
+                    float(
+                        candle[3]
+                    ),
+
+                "close":
+                    float(
+                        candle[4]
+                    ),
+
+                "volume":
+                    float(
+                        candle[5]
+                    ),
+            }
+        )
+
+    if not rows:
+        return None
+
+    df = pd.DataFrame(
+        rows
+    )
+
+    df = (
+        df
+        .sort_values(
+            "timestamp"
+        )
+        .drop_duplicates(
+            subset=[
+                "timestamp"
+            ]
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    return df
+
+
+# ============================================================
+# BUILD 4H FROM 1H
+# ============================================================
+
+def _build_4h_candles(
+    product,
+    limit,
+):
+
+    # Coinbase Exchange has no native 4H candle.
+    # We fetch 1H candles and combine every four hours.
+
+    requested_4h = max(
+        50,
+        int(limit),
+    )
+
+    # Coinbase returns at most roughly 300 candles
+    # per request, so this gives up to ~75 4H candles.
+    hourly_limit = min(
+        requested_4h * 4 + 8,
+        300,
+    )
+
+    hourly = (
+        _request_coinbase_candles(
+            product=product,
+            granularity_seconds=3600,
+            limit=hourly_limit,
+        )
+    )
+
+    if (
+        hourly is None
+        or len(hourly) < 4
+    ):
+        return None
+
+    df = hourly.copy()
+
+    df["datetime"] = pd.to_datetime(
+        df["timestamp"],
+        unit="ms",
+        utc=True,
+    )
+
+    # Align candles to UTC 4-hour blocks:
+    # 00:00, 04:00, 08:00, 12:00, 16:00, 20:00.
+    df["bucket"] = (
+        df["datetime"]
+        .dt.floor("4h")
+    )
+
+    aggregated = (
+        df.groupby(
+            "bucket",
+            as_index=False,
+        )
+        .agg(
+            {
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+            }
+        )
+    )
+
+    aggregated[
+        "timestamp"
+    ] = (
+        aggregated[
+            "bucket"
+        ]
+        .astype("int64")
+        // 10**6
+    )
+
+    aggregated = aggregated[
+        [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+    ]
+
+    aggregated = (
+        aggregated
+        .sort_values(
+            "timestamp"
+        )
+        .tail(
+            int(limit)
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    return aggregated
+
+
+# ============================================================
+# TICKER
+# ============================================================
 
 def get_ticker(
     symbol,
@@ -78,92 +361,161 @@ def get_ticker(
     api_secret="",
     use_testnet=False,
 ):
-    """
-    Returns public ticker data from Coinbase Exchange.
-    """
 
     try:
-        product = _product_id(symbol)
+
+        product = _product_id(
+            symbol
+        )
 
         ticker_url = (
-            f"{COINBASE_BASE}/products/{product}/ticker"
+            f"{COINBASE_BASE}"
+            f"/products/{product}/ticker"
         )
 
         stats_url = (
-            f"{COINBASE_BASE}/products/{product}/stats"
+            f"{COINBASE_BASE}"
+            f"/products/{product}/stats"
         )
-
-        headers = {
-            "User-Agent": "crypto-futures-paper-bot/1.0",
-            "Accept": "application/json",
-        }
 
         ticker_response = requests.get(
             ticker_url,
-            headers=headers,
+            headers=HEADERS,
             timeout=10,
         )
 
         ticker_response.raise_for_status()
 
-        ticker = ticker_response.json()
+        ticker = (
+            ticker_response.json()
+        )
 
         stats_response = requests.get(
             stats_url,
-            headers=headers,
+            headers=HEADERS,
             timeout=10,
         )
 
         stats_response.raise_for_status()
 
-        stats = stats_response.json()
+        stats = (
+            stats_response.json()
+        )
 
         last = float(
-            ticker.get("price") or 0
+            ticker.get(
+                "price"
+            )
+            or 0
         )
 
         high = float(
-            stats.get("high") or 0
+            stats.get(
+                "high"
+            )
+            or 0
         )
 
         low = float(
-            stats.get("low") or 0
+            stats.get(
+                "low"
+            )
+            or 0
         )
 
         open_price = float(
-            stats.get("open") or 0
+            stats.get(
+                "open"
+            )
+            or 0
         )
 
         volume = float(
-            stats.get("volume") or 0
+            stats.get(
+                "volume"
+            )
+            or 0
+        )
+
+        bid = float(
+            ticker.get(
+                "bid"
+            )
+            or 0
+        )
+
+        ask = float(
+            ticker.get(
+                "ask"
+            )
+            or 0
         )
 
         if open_price > 0:
+
             change_pct = (
-                (last - open_price)
+                (
+                    last
+                    - open_price
+                )
                 / open_price
                 * 100
             )
+
         else:
+
             change_pct = 0.0
+
+        spread_pct = 0.0
+
+        if (
+            bid > 0
+            and ask > 0
+        ):
+
+            midpoint = (
+                bid + ask
+            ) / 2
+
+            if midpoint > 0:
+
+                spread_pct = (
+                    (
+                        ask - bid
+                    )
+                    / midpoint
+                    * 100
+                )
 
         return {
             "last": last,
-            "change_pct": change_pct,
+            "change_pct":
+                change_pct,
             "high": high,
             "low": low,
             "volume": volume,
-            "source": "Coinbase",
+            "bid": bid,
+            "ask": ask,
+            "spread_pct":
+                spread_pct,
+            "source":
+                "Coinbase",
         }
 
     except Exception as error:
+
         print(
-            f"Coinbase ticker error: {error}",
+            "Coinbase ticker error: "
+            f"{error}",
             flush=True,
         )
 
         return None
 
+
+# ============================================================
+# CANDLES
+# ============================================================
 
 def get_candles(
     exchange,
@@ -174,17 +526,14 @@ def get_candles(
     api_secret="",
     use_testnet=False,
 ):
-    """
-    Get public OHLCV candles from Coinbase Exchange.
-
-    The exchange/API/testnet arguments are kept so the
-    existing app.py and bot_worker.py do not need changing.
-    """
 
     try:
-        product = _product_id(symbol)
 
-        granularity = _granularity(
+        product = _product_id(
+            symbol
+        )
+
+        timeframe_minutes = int(
             timeframe_minutes
         )
 
@@ -196,111 +545,76 @@ def get_candles(
             ),
         )
 
-        now = int(time.time())
+        # ----------------------------------------------------
+        # TRUE 4H SUPPORT
+        # ----------------------------------------------------
 
-        start = (
-            now
-            - (
-                granularity
-                * limit
+        if timeframe_minutes == 240:
+
+            return _build_4h_candles(
+                product=product,
+                limit=limit,
+            )
+
+        # ----------------------------------------------------
+        # NATIVE COINBASE TIMEFRAMES
+        # ----------------------------------------------------
+
+        granularity = (
+            _native_granularity(
+                timeframe_minutes
             )
         )
 
-        url = (
-            f"{COINBASE_BASE}"
-            f"/products/{product}/candles"
+        if granularity is None:
+
+            raise ValueError(
+                "Unsupported timeframe: "
+                f"{timeframe_minutes} minutes"
+            )
+
+        df = (
+            _request_coinbase_candles(
+                product=product,
+                granularity_seconds=(
+                    granularity
+                ),
+                limit=limit,
+            )
         )
 
-        params = {
-            "granularity": granularity,
-            "start": pd.Timestamp(
-                start,
-                unit="s",
-                tz="UTC",
-            ).isoformat(),
-            "end": pd.Timestamp(
-                now,
-                unit="s",
-                tz="UTC",
-            ).isoformat(),
-        }
+        if df is None:
 
-        headers = {
-            "User-Agent": "crypto-futures-paper-bot/1.0",
-            "Accept": "application/json",
-        }
-
-        response = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=15,
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        if not data:
             print(
-                "Coinbase returned no candles.",
+                "Coinbase returned "
+                f"no candles for {product}.",
                 flush=True,
             )
+
             return None
 
-        rows = []
-
-        for candle in data:
-
-            if (
-                not isinstance(candle, list)
-                or len(candle) < 6
-            ):
-                continue
-
-            timestamp = candle[0]
-            low = candle[1]
-            high = candle[2]
-            open_price = candle[3]
-            close = candle[4]
-            volume = candle[5]
-
-            rows.append(
-                {
-                    "timestamp": int(timestamp) * 1000,
-                    "open": float(open_price),
-                    "high": float(high),
-                    "low": float(low),
-                    "close": float(close),
-                    "volume": float(volume),
-                }
-            )
-
-        if not rows:
-            return None
-
-        df = pd.DataFrame(rows)
-
-        # Coinbase usually returns newest first.
-        df = (
-            df.sort_values("timestamp")
-            .drop_duplicates(
-                subset=["timestamp"]
-            )
+        return (
+            df
             .tail(limit)
-            .reset_index(drop=True)
+            .reset_index(
+                drop=True
+            )
         )
 
-        return df
-
     except Exception as error:
+
         print(
-            f"Coinbase candles error: {error}",
+            "Coinbase candles error: "
+            f"{error}",
             flush=True,
         )
 
         return None
 
+
+# ============================================================
+# MARKET SNAPSHOTS
+# ============================================================
 
 def get_market_data(
     exchange=None,
@@ -308,9 +622,6 @@ def get_market_data(
     api_secret="",
     use_testnet=False,
 ):
-    """
-    Return market snapshots for major crypto assets.
-    """
 
     symbols = [
         "BTCUSDT",
@@ -335,13 +646,26 @@ def get_market_data(
 
             results.append(
                 {
-                    "symbol": symbol,
-                    "price": None,
-                    "change_pct": None,
-                    "high": None,
-                    "low": None,
-                    "status": "Unavailable",
-                    "source": "Coinbase",
+                    "symbol":
+                        symbol,
+
+                    "price":
+                        None,
+
+                    "change_pct":
+                        None,
+
+                    "high":
+                        None,
+
+                    "low":
+                        None,
+
+                    "status":
+                        "Unavailable",
+
+                    "source":
+                        "Coinbase",
                 }
             )
 
@@ -349,15 +673,34 @@ def get_market_data(
 
         results.append(
             {
-                "symbol": symbol,
-                "price": ticker["last"],
-                "change_pct": ticker[
-                    "change_pct"
-                ],
-                "high": ticker["high"],
-                "low": ticker["low"],
-                "status": "Live",
-                "source": "Coinbase",
+                "symbol":
+                    symbol,
+
+                "price":
+                    ticker[
+                        "last"
+                    ],
+
+                "change_pct":
+                    ticker[
+                        "change_pct"
+                    ],
+
+                "high":
+                    ticker[
+                        "high"
+                    ],
+
+                "low":
+                    ticker[
+                        "low"
+                    ],
+
+                "status":
+                    "Live",
+
+                "source":
+                    "Coinbase",
             }
         )
 
