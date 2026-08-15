@@ -2,17 +2,16 @@
 app.py
 
 PRO AI QUANT TERMINAL
-Stable autonomous PAPER trading version.
+Multi-market autonomous PAPER trading dashboard.
 
 Architecture:
-- NO background threading
-- NO cached trading worker
-- Streamlit fragment runs one trading cycle every POLL_SECONDS
-- PaperTrader stored in Streamlit Session State
-- UK-compatible public market data
-- Signal Engine
-- Risk Manager
+- Streamlit fragment runs one cycle every POLL_SECONDS
+- PostgreSQL-backed PaperTrader
+- Coinbase public market data
+- Multi-market scanner
+- Strongest confirmed setup selection
 - Automatic simulated TP / SL
+- One open position at a time
 
 IMPORTANT:
 REAL ORDERS ARE DISABLED.
@@ -62,55 +61,44 @@ PAPER_TRADING = (
     os.environ.get("PAPER_TRADING", "true").lower() == "true"
 )
 
-PAPER_SYMBOL = os.environ.get(
-    "SYMBOL",
-    "BTCUSDT",
-).upper()
-
 PAPER_BALANCE = float(
-    os.environ.get(
-        "PAPER_BALANCE",
-        "10000",
-    )
+    os.environ.get("PAPER_BALANCE", "10000")
 )
 
 RISK_PCT = float(
-    os.environ.get(
-        "RISK_PCT",
-        "1",
-    )
+    os.environ.get("RISK_PCT", "1")
 )
 
 SL_PCT = float(
-    os.environ.get(
-        "SL_PCT",
-        "1",
-    )
+    os.environ.get("SL_PCT", "1")
 )
 
 TP_PCT = float(
-    os.environ.get(
-        "TP_PCT",
-        "2",
-    )
+    os.environ.get("TP_PCT", "2")
 )
 
 POLL_SECONDS = int(
-    os.environ.get(
-        "POLL_SECONDS",
-        "60",
-    )
+    os.environ.get("POLL_SECONDS", "60")
 )
 
 MAX_DAILY_LOSS_PCT = float(
-    os.environ.get(
-        "MAX_DAILY_LOSS_PCT",
-        "5",
-    )
+    os.environ.get("MAX_DAILY_LOSS_PCT", "5")
+)
+
+TIMEFRAME_MINUTES = int(
+    os.environ.get("TIMEFRAME_MINUTES", "15")
+)
+
+CANDLE_LIMIT = int(
+    os.environ.get("CANDLE_LIMIT", "100")
 )
 
 
-TOP_SYMBOLS = [
+# ============================================================
+# SCAN MARKETS
+# ============================================================
+
+SCAN_MARKETS = [
     "BTCUSDT",
     "ETHUSDT",
     "SOLUSDT",
@@ -126,11 +114,11 @@ TOP_SYMBOLS = [
 
 
 # ============================================================
-# SESSION STATE INITIALISATION
+# SESSION STATE
 # ============================================================
 
 if "selected_pair" not in st.session_state:
-    st.session_state.selected_pair = PAPER_SYMBOL
+    st.session_state.selected_pair = "BTCUSDT"
 
 if "display_exchange" not in st.session_state:
     st.session_state.display_exchange = "Coinbase"
@@ -161,8 +149,14 @@ if "bot_macd" not in st.session_state:
 if "bot_price" not in st.session_state:
     st.session_state.bot_price = None
 
+if "bot_market" not in st.session_state:
+    st.session_state.bot_market = "—"
+
 if "bot_position" not in st.session_state:
     st.session_state.bot_position = None
+
+if "scanner_results" not in st.session_state:
+    st.session_state.scanner_results = []
 
 if "last_trade" not in st.session_state:
     st.session_state.last_trade = None
@@ -412,109 +406,6 @@ html(
         margin-top: 8px;
     }
 
-    .intelligence {
-        min-height: 300px;
-        position: relative;
-        overflow: hidden;
-        border: 1px solid #252f3b;
-        background:
-            radial-gradient(
-                circle at center,
-                rgba(45,222,205,.07),
-                transparent 33%
-            ),
-            #070a0e;
-        margin-top: 4px;
-    }
-
-    .intelligence-title {
-        position: absolute;
-        left: 12px;
-        top: 10px;
-        color: #6c798b;
-        font-family: monospace;
-        font-size: 9px;
-    }
-
-    .core {
-        position: absolute;
-        left: calc(50% - 48px);
-        top: calc(50% - 48px);
-        width: 96px;
-        height: 96px;
-        border-radius: 50%;
-        border: 2px solid #f1d33b;
-        background: #15140b;
-        color: #f1d33b;
-        font-family: monospace;
-        font-size: 11px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        text-align: center;
-        box-shadow:
-            0 0 16px rgba(241,211,59,.28),
-            0 0 45px rgba(241,211,59,.12);
-        z-index: 5;
-    }
-
-    .node {
-        position: absolute;
-        width: 68px;
-        height: 68px;
-        border-radius: 50%;
-        background: #0b1016;
-        border: 1px solid #303b47;
-        font-family: monospace;
-        font-size: 9px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        text-align: center;
-    }
-
-    .rsi-node {
-        left: 13%;
-        top: 21%;
-        color: #2ee2c9;
-        border-color: #2ee2c9;
-    }
-
-    .macd-node {
-        right: 13%;
-        top: 19%;
-        color: #ff547b;
-        border-color: #ff547b;
-    }
-
-    .trend-node {
-        left: 20%;
-        bottom: 11%;
-        color: #aa82ff;
-        border-color: #aa82ff;
-    }
-
-    .risk-node {
-        right: 20%;
-        bottom: 11%;
-        color: #f1d33b;
-        border-color: #f1d33b;
-    }
-
-    .price-node {
-        left: 6%;
-        top: 52%;
-        color: #54aaff;
-        border-color: #54aaff;
-    }
-
-    .tpsl-node {
-        right: 6%;
-        top: 52%;
-        color: #00da98;
-        border-color: #00da98;
-    }
-
     .safe-notice {
         border: 1px solid #00da98;
         background: #07150f;
@@ -530,7 +421,127 @@ html(
 
 
 # ============================================================
-# ONE SAFE PAPER-TRADING CYCLE
+# MARKET ANALYSIS
+# ============================================================
+
+def analyse_market(symbol):
+
+    candles = get_candles(
+        exchange="PUBLIC",
+        symbol=symbol,
+        timeframe_minutes=TIMEFRAME_MINUTES,
+        limit=CANDLE_LIMIT,
+        api_key="",
+        api_secret="",
+        use_testnet=False,
+    )
+
+    if candles is None or len(candles) < 50:
+        return None
+
+    current_price = float(
+        candles["close"].iloc[-1]
+    )
+
+    signal_data = generate_signal(
+        candles
+    )
+
+    return {
+        "symbol": symbol,
+        "price": current_price,
+        "signal": signal_data.get(
+            "signal",
+            "NO TRADE",
+        ),
+        "score": float(
+            signal_data.get(
+                "score",
+                0,
+            )
+        ),
+        "rsi": signal_data.get(
+            "rsi",
+            None,
+        ),
+        "macd": signal_data.get(
+            "macd",
+            None,
+        ),
+        "reason": signal_data.get(
+            "reason",
+            "",
+        ),
+    }
+
+
+def scan_markets():
+
+    results = []
+
+    for symbol in SCAN_MARKETS:
+
+        try:
+
+            result = analyse_market(
+                symbol
+            )
+
+            if result:
+                results.append(
+                    result
+                )
+
+        except Exception as error:
+
+            print(
+                f"[SCAN ERROR] "
+                f"{symbol}: {error}",
+                flush=True,
+            )
+
+    return results
+
+
+def select_best_setup(results):
+
+    confirmed = []
+
+    for item in results:
+
+        if item["signal"] not in (
+            "BUY",
+            "SELL",
+        ):
+            continue
+
+        item["absolute_score"] = abs(
+            float(
+                item["score"]
+            )
+        )
+
+        confirmed.append(
+            item
+        )
+
+    if not confirmed:
+        return None
+
+    confirmed.sort(
+        key=lambda item: (
+            item[
+                "absolute_score"
+            ]
+        ),
+        reverse=True,
+    )
+
+    return confirmed[0]
+
+
+# ============================================================
+# PAPER CYCLE
 # ============================================================
 
 def run_paper_cycle():
@@ -543,10 +554,6 @@ def run_paper_cycle():
 
     try:
 
-        # ----------------------------------------------------
-        # BALANCE / DAILY RESET
-        # ----------------------------------------------------
-
         balance = trader.get_balance()
 
         today = now_utc.date()
@@ -554,16 +561,8 @@ def run_paper_cycle():
         if st.session_state.day_start_date != today:
 
             st.session_state.day_start_date = today
-
-            st.session_state.day_start_balance = (
-                balance
-            )
-
+            st.session_state.day_start_balance = balance
             st.session_state.trading_paused = False
-
-        # ----------------------------------------------------
-        # DAILY DRAWDOWN
-        # ----------------------------------------------------
 
         day_start_balance = (
             st.session_state.day_start_balance
@@ -590,64 +589,53 @@ def run_paper_cycle():
             drawdown_pct
             >= MAX_DAILY_LOSS_PCT
         ):
-
             st.session_state.trading_paused = True
 
-        # ----------------------------------------------------
-        # MARKET DATA
-        # ----------------------------------------------------
-
-        candles = get_candles(
-            exchange="PUBLIC",
-            symbol=PAPER_SYMBOL,
-            timeframe_minutes=15,
-            limit=100,
-            api_key="",
-            api_secret="",
-            use_testnet=False,
-        )
-
-        if candles is None:
-
-            st.session_state.bot_status = (
-                "WAITING FOR MARKET DATA"
-            )
-
-            st.session_state.last_update = (
-                now_utc.isoformat()
-            )
-
-            return
-
-        if len(candles) < 50:
-
-            st.session_state.bot_status = (
-                "NOT ENOUGH MARKET DATA"
-            )
-
-            st.session_state.last_update = (
-                now_utc.isoformat()
-            )
-
-            return
-
-        current_price = float(
-            candles["close"].iloc[-1]
-        )
-
-        st.session_state.bot_price = (
-            current_price
-        )
-
-        # ----------------------------------------------------
-        # EXISTING POSITION
-        # ----------------------------------------------------
+        # ====================================================
+        # EXISTING POSITION HAS FIRST PRIORITY
+        # ====================================================
 
         existing_position = (
             trader.get_position()
         )
 
         if existing_position:
+
+            position_symbol = (
+                existing_position[
+                    "symbol"
+                ]
+            )
+
+            st.session_state.bot_market = (
+                position_symbol
+            )
+
+            candles = get_candles(
+                exchange="PUBLIC",
+                symbol=position_symbol,
+                timeframe_minutes=TIMEFRAME_MINUTES,
+                limit=CANDLE_LIMIT,
+                api_key="",
+                api_secret="",
+                use_testnet=False,
+            )
+
+            if candles is None:
+
+                st.session_state.bot_status = (
+                    "WAITING FOR POSITION DATA"
+                )
+
+                st.session_state.last_update = (
+                    now_utc.isoformat()
+                )
+
+                return
+
+            current_price = float(
+                candles["close"].iloc[-1]
+            )
 
             result = trader.update_price(
                 current_price
@@ -661,17 +649,21 @@ def run_paper_cycle():
                 current_position
             )
 
-            st.session_state.bot_status = (
-                "POSITION OPEN"
-                if current_position
-                else "TRADE CLOSED"
+            st.session_state.bot_price = (
+                current_price
             )
 
             if (
                 result
-                and result.get("status")
+                and result.get(
+                    "status"
+                )
                 == "CLOSED"
             ):
+
+                st.session_state.bot_status = (
+                    "TRADE CLOSED"
+                )
 
                 st.session_state.last_trade = (
                     result
@@ -688,15 +680,23 @@ def run_paper_cycle():
 
                 st.session_state.bot_position = None
 
+            else:
+
+                st.session_state.bot_status = (
+                    "POSITION OPEN"
+                )
+
             st.session_state.last_update = (
                 now_utc.isoformat()
             )
 
+            st.session_state.bot_error = None
+
             return
 
-        # ----------------------------------------------------
-        # DAILY RISK STOP
-        # ----------------------------------------------------
+        # ====================================================
+        # DAILY LOSS BLOCK
+        # ====================================================
 
         if st.session_state.trading_paused:
 
@@ -710,57 +710,93 @@ def run_paper_cycle():
 
             return
 
-        # ----------------------------------------------------
-        # SIGNAL ENGINE
-        # ----------------------------------------------------
+        # ====================================================
+        # MULTI-MARKET SCAN
+        # ====================================================
 
-        signal_data = generate_signal(
-            candles
+        st.session_state.bot_status = (
+            f"SCANNING {len(SCAN_MARKETS)} MARKETS"
         )
 
-        signal = signal_data.get(
-            "signal",
-            "NO TRADE",
+        results = scan_markets()
+
+        st.session_state.scanner_results = (
+            results
         )
 
-        score = signal_data.get(
-            "score",
-            0,
-        )
-
-        reason = signal_data.get(
-            "reason",
-            "",
-        )
-
-        rsi = signal_data.get(
-            "rsi",
-            None,
-        )
-
-        macd = signal_data.get(
-            "macd",
-            None,
-        )
-
-        st.session_state.bot_signal = signal
-        st.session_state.bot_score = score
-        st.session_state.bot_reason = reason
-        st.session_state.bot_rsi = rsi
-        st.session_state.bot_macd = macd
-        st.session_state.bot_position = None
-
-        # ----------------------------------------------------
-        # NO SIGNAL
-        # ----------------------------------------------------
-
-        if signal not in (
-            "BUY",
-            "SELL",
-        ):
+        if not results:
 
             st.session_state.bot_status = (
-                "SCANNING MARKET"
+                "NO MARKET DATA"
+            )
+
+            st.session_state.last_update = (
+                now_utc.isoformat()
+            )
+
+            return
+
+        best_setup = select_best_setup(
+            results
+        )
+
+        # Use strongest absolute score for dashboard
+        strongest_visible = sorted(
+            results,
+            key=lambda x: abs(
+                float(
+                    x["score"]
+                )
+            ),
+            reverse=True,
+        )[0]
+
+        st.session_state.bot_market = (
+            strongest_visible[
+                "symbol"
+            ]
+        )
+
+        st.session_state.bot_signal = (
+            strongest_visible[
+                "signal"
+            ]
+        )
+
+        st.session_state.bot_score = (
+            strongest_visible[
+                "score"
+            ]
+        )
+
+        st.session_state.bot_reason = (
+            strongest_visible[
+                "reason"
+            ]
+        )
+
+        st.session_state.bot_rsi = (
+            strongest_visible[
+                "rsi"
+            ]
+        )
+
+        st.session_state.bot_macd = (
+            strongest_visible[
+                "macd"
+            ]
+        )
+
+        st.session_state.bot_price = (
+            strongest_visible[
+                "price"
+            ]
+        )
+
+        if best_setup is None:
+
+            st.session_state.bot_status = (
+                "NO QUALIFYING TRADE"
             )
 
             st.session_state.last_update = (
@@ -771,13 +807,27 @@ def run_paper_cycle():
 
             return
 
-        # ----------------------------------------------------
-        # RISK PLAN
-        # ----------------------------------------------------
+        # ====================================================
+        # OPEN STRONGEST CONFIRMED SETUP
+        # ====================================================
+
+        signal = best_setup[
+            "signal"
+        ]
+
+        symbol = best_setup[
+            "symbol"
+        ]
+
+        entry_price = float(
+            best_setup[
+                "price"
+            ]
+        )
 
         plan = calculate_trade_plan(
             balance=trader.get_balance(),
-            entry_price=current_price,
+            entry_price=entry_price,
             signal=signal,
             risk_percent=RISK_PCT,
             stop_loss_percent=SL_PCT,
@@ -798,21 +848,51 @@ def run_paper_cycle():
 
             return
 
-        # ----------------------------------------------------
-        # OPEN PAPER TRADE
-        # ----------------------------------------------------
-
         result = trader.open_trade(
-            symbol=PAPER_SYMBOL,
+            symbol=symbol,
             signal=signal,
-            entry_price=current_price,
-            quantity=plan["quantity"],
-            take_profit=plan["take_profit"],
-            stop_loss=plan["stop_loss"],
+            entry_price=entry_price,
+            quantity=plan[
+                "quantity"
+            ],
+            take_profit=plan[
+                "take_profit"
+            ],
+            stop_loss=plan[
+                "stop_loss"
+            ],
+        )
+
+        st.session_state.bot_market = symbol
+        st.session_state.bot_signal = signal
+        st.session_state.bot_score = (
+            best_setup[
+                "score"
+            ]
+        )
+        st.session_state.bot_reason = (
+            best_setup[
+                "reason"
+            ]
+        )
+        st.session_state.bot_rsi = (
+            best_setup[
+                "rsi"
+            ]
+        )
+        st.session_state.bot_macd = (
+            best_setup[
+                "macd"
+            ]
+        )
+        st.session_state.bot_price = (
+            entry_price
         )
 
         if (
-            result.get("status")
+            result.get(
+                "status"
+            )
             == "EXECUTED"
         ):
 
@@ -857,20 +937,27 @@ def run_paper_cycle():
 
 def render_terminal():
 
+    trader = st.session_state.paper_trader
+
+    balance = trader.get_balance()
+
+    position = trader.get_position()
+
+    st.session_state.bot_position = (
+        position
+    )
+
     utc_now = datetime.now(
         timezone.utc
     ).strftime(
         "%H:%M:%S UTC"
     )
 
-    trader = st.session_state.paper_trader
-
-    balance = trader.get_balance()
-
     signal = st.session_state.bot_signal
 
     score = int(
-        st.session_state.bot_score or 0
+        st.session_state.bot_score
+        or 0
     )
 
     reason_text = (
@@ -885,13 +972,9 @@ def render_terminal():
         st.session_state.bot_macd
     )
 
-    position = (
-        st.session_state.bot_position
+    bot_market = (
+        st.session_state.bot_market
     )
-
-    # --------------------------------------------------------
-    # HEADER
-    # --------------------------------------------------------
 
     html(
         f"""
@@ -906,7 +989,7 @@ def render_terminal():
                 </div>
 
                 <div class="terminal-subtitle">
-                    AUTONOMOUS PAPER EXECUTION /
+                    MULTI-MARKET PAPER EXECUTION /
                     SIGNAL INTELLIGENCE /
                     RISK ENGINE
                 </div>
@@ -924,22 +1007,22 @@ def render_terminal():
     html(
         f"""
         <div class="terminal-strip">
-            MARKET FEED: UK PUBLIC DATA
+            MARKET FEED: COINBASE PUBLIC DATA
             &nbsp; | &nbsp;
-            BOT: {PAPER_SYMBOL}
+            SCANNER: {len(SCAN_MARKETS)} MARKETS
+            &nbsp; | &nbsp;
+            BOT MARKET: {bot_market}
             &nbsp; | &nbsp;
             MODE: PAPER
             &nbsp; | &nbsp;
             SCAN: {POLL_SECONDS}s
-            &nbsp; | &nbsp;
-            REAL EXECUTION: OFF
         </div>
         """
     )
 
-    # --------------------------------------------------------
-    # CONTROLS
-    # --------------------------------------------------------
+    # ========================================================
+    # CHART CONTROLS
+    # ========================================================
 
     c1, c2, c3 = st.columns(
         [
@@ -952,14 +1035,14 @@ def render_terminal():
     with c1:
 
         selected_pair = st.selectbox(
-            "Market",
-            TOP_SYMBOLS,
+            "Chart Market",
+            SCAN_MARKETS,
             index=(
-                TOP_SYMBOLS.index(
+                SCAN_MARKETS.index(
                     st.session_state.selected_pair
                 )
                 if st.session_state.selected_pair
-                in TOP_SYMBOLS
+                in SCAN_MARKETS
                 else 0
             ),
         )
@@ -995,7 +1078,7 @@ def render_terminal():
             </span>
 
             <span class="tag cyan">
-                PUBLIC MARKET DATA
+                MULTI-MARKET SCANNER
             </span>
 
             <span class="tag yellow">
@@ -1003,14 +1086,14 @@ def render_terminal():
             </span>
 
             <span class="tag purple">
-                RISK ENGINE
+                POSTGRES STATE
             </span>
             """
         )
 
-    # --------------------------------------------------------
-    # TICKER
-    # --------------------------------------------------------
+    # ========================================================
+    # SELECTED TICKER
+    # ========================================================
 
     ticker = get_ticker(
         symbol=selected_pair,
@@ -1055,9 +1138,9 @@ def render_terminal():
             )
         )
 
-    # --------------------------------------------------------
-    # MAIN LAYOUT
-    # --------------------------------------------------------
+    # ========================================================
+    # MAIN PANELS
+    # ========================================================
 
     account_col, chart_col, execution_col = (
         st.columns(
@@ -1069,16 +1152,7 @@ def render_terminal():
         )
     )
 
-    # ACCOUNT
     with account_col:
-
-        html(
-            """
-            <div class="panel-title">
-                ACCOUNT / BOT STATE
-            </div>
-            """
-        )
 
         html(
             f"""
@@ -1097,7 +1171,8 @@ def render_terminal():
                 </div>
 
                 <div class="green"
-                     style="font-family:monospace;
+                     style="
+                     font-family:monospace;
                      font-size:19px;
                      padding:6px 0 13px 0;">
                     ${st.session_state.realized_pnl:,.2f}
@@ -1108,9 +1183,9 @@ def render_terminal():
                 </div>
 
                 <div style="
-                    font-family:monospace;
-                    font-size:18px;
-                    padding:6px 0 13px 0;">
+                     font-family:monospace;
+                     font-size:18px;
+                     padding:6px 0 13px 0;">
                     {st.session_state.trade_count}
                 </div>
 
@@ -1127,7 +1202,7 @@ def render_terminal():
                 </div>
 
                 <div class="safe-notice">
-                    PAPER EXECUTION ONLY<br>
+                    ONE POSITION MAX<br>
                     REAL ORDERS DISABLED
                 </div>
 
@@ -1135,16 +1210,7 @@ def render_terminal():
             """
         )
 
-    # CHART
     with chart_col:
-
-        html(
-            """
-            <div class="panel-title">
-                LIVE PRICE / MARKET STRUCTURE
-            </div>
-            """
-        )
 
         price_css = (
             "green"
@@ -1155,7 +1221,9 @@ def render_terminal():
         html(
             f"""
             <div class="terminal-strip">
+
                 {selected_pair}
+
                 &nbsp;&nbsp;
 
                 <span class="{price_css}">
@@ -1175,6 +1243,7 @@ def render_terminal():
                 &nbsp;&nbsp;
 
                 LOW ${low_price:,.2f}
+
             </div>
             """
         )
@@ -1250,16 +1319,7 @@ def render_terminal():
             height=440,
         )
 
-    # EXECUTION
     with execution_col:
-
-        html(
-            """
-            <div class="panel-title">
-                AI EXECUTION ENGINE
-            </div>
-            """
-        )
 
         signal_css = (
             "green"
@@ -1274,6 +1334,20 @@ def render_terminal():
         html(
             f"""
             <div class="panel execution-panel">
+
+                <div class="small-muted">
+                    BOT MARKET
+                </div>
+
+                <div
+                    class="purple"
+                    style="
+                    font-family:monospace;
+                    font-size:16px;">
+                    {bot_market}
+                </div>
+
+                <br>
 
                 <div class="small-muted">
                     LIVE SIGNAL
@@ -1294,7 +1368,7 @@ def render_terminal():
                 </div>
 
                 <div class="small-muted">
-                    BOT STATUS
+                    STATUS
                 </div>
 
                 <div style="
@@ -1305,35 +1379,24 @@ def render_terminal():
                 </div>
 
                 <div class="small-muted">
-                    RISK / TRADE
+                    RISK
                 </div>
 
-                <div class="cyan"
-                     style="
-                     font-family:monospace;
-                     padding:4px 0 10px 0;">
+                <div class="cyan">
                     {RISK_PCT:.1f}%
                 </div>
 
+                <br>
+
                 <div class="small-muted">
-                    TAKE PROFIT
+                    TP / SL
                 </div>
 
-                <div class="green"
-                     style="
-                     font-family:monospace;
-                     padding:4px 0 10px 0;">
+                <div class="green">
                     +{TP_PCT:.1f}%
                 </div>
 
-                <div class="small-muted">
-                    STOP LOSS
-                </div>
-
-                <div class="red"
-                     style="
-                     font-family:monospace;
-                     padding-top:4px;">
+                <div class="red">
                     -{SL_PCT:.1f}%
                 </div>
 
@@ -1341,284 +1404,111 @@ def render_terminal():
             """
         )
 
-    # --------------------------------------------------------
-    # INDICATOR VALUES
-    # --------------------------------------------------------
+    # ========================================================
+    # SCANNER TABLE
+    # ========================================================
 
-    rsi_text = (
-        f"{float(rsi_value):.1f}"
-        if rsi_value is not None
-        else "—"
+    st.subheader(
+        "🔎 Multi-Market AI Scanner"
     )
 
-    macd_text = (
-        f"{float(macd_value):.2f}"
-        if macd_value is not None
-        else "—"
+    scanner_results = (
+        st.session_state.scanner_results
     )
 
-    rsi_state = "Neutral"
+    if scanner_results:
 
-    if rsi_value is not None:
-
-        if float(rsi_value) >= 70:
-            rsi_state = "Overbought"
-
-        elif float(rsi_value) <= 30:
-            rsi_state = "Oversold"
-
-    if "Bullish trend" in reason_text:
-        trend_state = "Bullish"
-
-    elif "Bearish trend" in reason_text:
-        trend_state = "Bearish"
-
-    else:
-        trend_state = "Neutral"
-
-    html(
-        f"""
-        <div class="indicator-grid">
-
-            <div class="indicator-card">
-                <div class="indicator-name">
-                    RSI 14
-                </div>
-                <div class="indicator-value yellow">
-                    {rsi_text}
-                </div>
-                <div class="small-muted">
-                    {rsi_state}
-                </div>
-            </div>
-
-            <div class="indicator-card">
-                <div class="indicator-name">
-                    MACD
-                </div>
-                <div class="indicator-value cyan">
-                    {macd_text}
-                </div>
-                <div class="small-muted">
-                    Momentum
-                </div>
-            </div>
-
-            <div class="indicator-card">
-                <div class="indicator-name">
-                    TREND
-                </div>
-                <div class="indicator-value green">
-                    {trend_state}
-                </div>
-                <div class="small-muted">
-                    EMA Structure
-                </div>
-            </div>
-
-            <div class="indicator-card">
-                <div class="indicator-name">
-                    SIGNAL SCORE
-                </div>
-                <div class="indicator-value yellow">
-                    {score:+d}
-                </div>
-                <div class="small-muted">
-                    Strategy Score
-                </div>
-            </div>
-
-            <div class="indicator-card">
-                <div class="indicator-name">
-                    BOT MARKET
-                </div>
-                <div class="indicator-value purple">
-                    {PAPER_SYMBOL}
-                </div>
-                <div class="small-muted">
-                    Autonomous
-                </div>
-            </div>
-
-            <div class="indicator-card">
-                <div class="indicator-name">
-                    SCAN RATE
-                </div>
-                <div class="indicator-value cyan">
-                    {POLL_SECONDS}s
-                </div>
-                <div class="small-muted">
-                    Cycle
-                </div>
-            </div>
-
-        </div>
-        """
-    )
-
-    # --------------------------------------------------------
-    # AI NETWORK
-    # --------------------------------------------------------
-
-    html(
-        f"""
-        <div class="intelligence">
-
-            <div class="intelligence-title">
-                AI MARKET INTELLIGENCE //
-                SIGNAL RELATIONSHIP ENGINE
-            </div>
-
-            <div class="node rsi-node">
-                RSI<br>
-                {rsi_text}
-            </div>
-
-            <div class="node macd-node">
-                MACD<br>
-                {macd_text}
-            </div>
-
-            <div class="node trend-node">
-                EMA<br>
-                {trend_state}
-            </div>
-
-            <div class="node risk-node">
-                RISK<br>
-                {RISK_PCT:.1f}%
-            </div>
-
-            <div class="node price-node">
-                PRICE<br>
-                ${market_price:,.0f}
-            </div>
-
-            <div class="node tpsl-node">
-                TP / SL<br>
-                AUTO
-            </div>
-
-            <div class="core">
-                AI CORE<br>
-                SCORE<br>
-                {score:+d}
-            </div>
-
-        </div>
-        """
-    )
-
-    # --------------------------------------------------------
-    # BOTTOM ANALYTICS
-    # --------------------------------------------------------
-
-    left_bottom, middle_bottom, right_bottom = (
-        st.columns(
+        scanner_df = pd.DataFrame(
             [
-                1.45,
-                1.25,
-                1,
+                {
+                    "Symbol": item[
+                        "symbol"
+                    ],
+                    "Price": round(
+                        float(
+                            item[
+                                "price"
+                            ]
+                        ),
+                        6,
+                    ),
+                    "Signal": item[
+                        "signal"
+                    ],
+                    "Score": item[
+                        "score"
+                    ],
+                    "RSI": (
+                        round(
+                            float(
+                                item[
+                                    "rsi"
+                                ]
+                            ),
+                            2,
+                        )
+                        if item[
+                            "rsi"
+                        ]
+                        is not None
+                        else None
+                    ),
+                    "MACD": (
+                        round(
+                            float(
+                                item[
+                                    "macd"
+                                ]
+                            ),
+                            4,
+                        )
+                        if item[
+                            "macd"
+                        ]
+                        is not None
+                        else None
+                    ),
+                    "Reason": item[
+                        "reason"
+                    ],
+                }
+                for item
+                in scanner_results
             ]
         )
-    )
 
-    with left_bottom:
-
-        html(
-            """
-            <div class="panel-title">
-                SIGNAL ANALYSIS
-            </div>
-            """
+        scanner_df = scanner_df.sort_values(
+            by="Score",
+            key=lambda series: (
+                series.abs()
+            ),
+            ascending=False,
         )
 
-        html(
-            f"""
-            <div class="panel">
-
-                <div class="small-muted">
-                    CURRENT INTERPRETATION
-                </div>
-
-                <div style="
-                    font-family:monospace;
-                    font-size:11px;
-                    line-height:1.7;
-                    padding-top:8px;">
-                    {reason_text or "Waiting for analysis"}
-                </div>
-
-                <br>
-
-                <div class="small-muted">
-                    LAST UPDATE
-                </div>
-
-                <div style="
-                    font-family:monospace;
-                    font-size:9px;
-                    padding-top:5px;">
-                    {st.session_state.last_update or "Starting"}
-                </div>
-
-            </div>
-            """
+        st.dataframe(
+            scanner_df,
+            width="stretch",
+            hide_index=True,
         )
 
-    with middle_bottom:
+    else:
 
-        html(
-            """
-            <div class="panel-title">
-                PERFORMANCE
-            </div>
-            """
-        )
+        if position:
 
-        st.metric(
-            "Starting Balance",
-            f"${PAPER_BALANCE:,.2f}",
-        )
+            st.info(
+                "Scanner paused while an existing paper "
+                "position is being managed."
+            )
 
-        st.metric(
-            "Current Equity",
-            f"${balance:,.2f}",
-        )
+        else:
 
-        st.metric(
-            "Realized P&L",
-            f"${st.session_state.realized_pnl:,.2f}",
-        )
+            st.info(
+                "Waiting for the first multi-market scan."
+            )
 
-    with right_bottom:
-
-        html(
-            """
-            <div class="panel-title">
-                RISK CONTROL
-            </div>
-            """
-        )
-
-        st.metric(
-            "Max Daily Loss",
-            f"{MAX_DAILY_LOSS_PCT:.1f}%",
-        )
-
-        st.metric(
-            "Current Drawdown",
-            f"{st.session_state.drawdown:.2f}%",
-        )
-
-        st.metric(
-            "Closed Trades",
-            st.session_state.trade_count,
-        )
-
-    # --------------------------------------------------------
-    # OPEN POSITION
-    # --------------------------------------------------------
+    # ========================================================
+    # ACTIVE POSITION
+    # ========================================================
 
     if position:
 
@@ -1661,9 +1551,35 @@ def render_terminal():
             hide_index=True,
         )
 
-    # --------------------------------------------------------
-    # LAST TRADE
-    # --------------------------------------------------------
+    # ========================================================
+    # ANALYSIS
+    # ========================================================
+
+    st.subheader(
+        "🧠 Current AI Analysis"
+    )
+
+    st.code(
+        f"""
+Bot Market: {bot_market}
+Status: {st.session_state.bot_status}
+Signal: {signal}
+Score: {score}
+RSI: {rsi_value}
+MACD: {macd_value}
+
+Reason:
+{reason_text or "Waiting for analysis"}
+
+Last Update:
+{st.session_state.last_update or "Starting"}
+""",
+        language="text",
+    )
+
+    # ========================================================
+    # LAST CLOSED TRADE
+    # ========================================================
 
     if st.session_state.last_trade:
 
@@ -1675,19 +1591,11 @@ def render_terminal():
                 st.session_state.last_trade
             )
 
-    # --------------------------------------------------------
-    # ERRORS
-    # --------------------------------------------------------
-
     if st.session_state.bot_error:
 
         st.error(
             st.session_state.bot_error
         )
-
-    # --------------------------------------------------------
-    # FOOTER
-    # --------------------------------------------------------
 
     html(
         """
@@ -1697,11 +1605,11 @@ def render_terminal():
 
             PRO AI QUANT TERMINAL
             &nbsp; • &nbsp;
-            AUTONOMOUS PAPER TRADING
+            MULTI-MARKET PAPER SCANNER
             &nbsp; • &nbsp;
-            UK PUBLIC MARKET DATA
+            POSTGRESQL STATE
             &nbsp; • &nbsp;
-            REAL ORDER EXECUTION DISABLED
+            REAL EXECUTION DISABLED
 
         </div>
         """
@@ -1709,7 +1617,7 @@ def render_terminal():
 
 
 # ============================================================
-# SAFE AUTO-RERUN
+# AUTO CYCLE
 # ============================================================
 
 @st.fragment(
