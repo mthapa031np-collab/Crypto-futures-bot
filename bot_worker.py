@@ -1,46 +1,32 @@
 """
 bot_worker.py
 
-MULTI-MARKET AUTONOMOUS PAPER TRADING WORKER
+DYNAMIC COINBASE MULTI-MARKET PAPER TRADING WORKER
 
-Scans:
-    BTCUSDT
-    ETHUSDT
-    SOLUSDT
-    XRPUSDT
-    ADAUSDT
-    DOGEUSDT
-    AVAXUSDT
-    LINKUSDT
-    DOTUSDT
-    NEARUSDT
-    SUIUSDT
-
-Flow:
-    Scan all markets
-        ↓
-    Signal engine
-        ↓
-    Rank confirmed BUY/SELL setups
-        ↓
-    Select strongest setup
-        ↓
-    Risk manager
-        ↓
-    Paper trade
-        ↓
-    Automatic simulated TP / SL
+What it does:
+- Discovers Coinbase Exchange spot products dynamically
+- Keeps USD / USDC quote markets
+- Rejects disabled / cancel-only / post-only markets
+- Filters by liquidity and spread
+- Keeps only the most liquid eligible markets
+- Fetches 15m candles
+- Runs signal_engine.py
+- Ranks confirmed BUY / SELL setups
+- Opens the strongest setup
+- Uses PostgreSQL-backed PaperTrader
+- Automatic simulated TP / SL
+- One open paper position at a time
 
 IMPORTANT:
-- PAPER TRADING ONLY
-- NO REAL ORDERS
-- Public UK-compatible market data
-- One open position at a time with the current PaperTrader
+PAPER TRADING ONLY.
+NO REAL ORDERS.
 """
 
 import os
 import time
 from datetime import datetime, timezone
+
+import requests
 
 from market_data import get_candles
 from signal_engine import generate_signal
@@ -54,6 +40,8 @@ from paper_trader import PaperTrader
 # ============================================================
 # CONFIG
 # ============================================================
+
+COINBASE_API = "https://api.exchange.coinbase.com"
 
 PAPER_TRADING = (
     os.environ.get(
@@ -119,54 +107,42 @@ CANDLE_LIMIT = int(
     )
 )
 
+MAX_SCAN_MARKETS = int(
+    os.environ.get(
+        "MAX_SCAN_MARKETS",
+        "40",
+    )
+)
 
-# ============================================================
-# MARKETS
-# ============================================================
+MIN_QUOTE_VOLUME_USD = float(
+    os.environ.get(
+        "MIN_QUOTE_VOLUME_USD",
+        "5000000",
+    )
+)
 
-DEFAULT_MARKETS = [
-    "BTCUSDT",
-    "ETHUSDT",
-    "SOLUSDT",
-    "XRPUSDT",
-    "ADAUSDT",
-    "DOGEUSDT",
-    "AVAXUSDT",
-    "LINKUSDT",
-    "DOTUSDT",
-    "NEARUSDT",
-    "SUIUSDT",
-]
+MAX_SPREAD_PCT = float(
+    os.environ.get(
+        "MAX_SPREAD_PCT",
+        "0.35",
+    )
+)
 
-
-raw_symbols = os.environ.get(
-    "SYMBOLS",
-    "",
-).strip()
-
-
-if raw_symbols:
-
-    MARKETS = [
-        symbol.strip().upper()
-        for symbol in raw_symbols.split(",")
-        if symbol.strip()
-    ]
-
-else:
-
-    MARKETS = DEFAULT_MARKETS
+MARKET_REFRESH_MINUTES = int(
+    os.environ.get(
+        "MARKET_REFRESH_MINUTES",
+        "30",
+    )
+)
 
 
 # ============================================================
-# SAFETY LOCK
+# SAFETY
 # ============================================================
 
 if not PAPER_TRADING:
-
     raise RuntimeError(
-        "Safety lock: this worker supports "
-        "PAPER_TRADING=true only."
+        "Safety lock: PAPER_TRADING=true is required."
     )
 
 
@@ -180,12 +156,15 @@ paper = PaperTrader(
 
 
 # ============================================================
-# DAILY RISK STATE
+# DAILY STATE
 # ============================================================
 
 _day_start_balance = PAPER_BALANCE
 _day_start_date = None
 _trading_paused = False
+
+_cached_markets = []
+_cached_markets_at = 0.0
 
 
 # ============================================================
@@ -205,6 +184,38 @@ def log(message):
 
 
 # ============================================================
+# HTTP HELPER
+# ============================================================
+
+def coinbase_get(
+    path,
+    params=None,
+    timeout=12,
+):
+
+    url = (
+        COINBASE_API
+        + path
+    )
+
+    response = requests.get(
+        url,
+        params=params,
+        timeout=timeout,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": (
+                "pro-ai-paper-scanner/1.0"
+            ),
+        },
+    )
+
+    response.raise_for_status()
+
+    return response.json()
+
+
+# ============================================================
 # DAILY CIRCUIT BREAKER
 # ============================================================
 
@@ -221,7 +232,11 @@ def check_circuit_breaker(balance):
     if _day_start_date != today:
 
         _day_start_date = today
-        _day_start_balance = balance
+
+        _day_start_balance = (
+            balance
+        )
+
         _trading_paused = False
 
         log(
@@ -233,7 +248,6 @@ def check_circuit_breaker(balance):
         return
 
     if _day_start_balance <= 0:
-
         return
 
     drawdown_pct = (
@@ -257,21 +271,392 @@ def check_circuit_breaker(balance):
             log(
                 "CIRCUIT BREAKER | "
                 f"Daily loss="
-                f"{drawdown_pct:.2f}% | "
-                "New trades paused."
+                f"{drawdown_pct:.2f}%"
             )
 
 
 # ============================================================
-# MARKET DATA
+# PRODUCT DISCOVERY
 # ============================================================
 
-def get_market_candles(symbol):
+def get_coinbase_products():
+
+    products = coinbase_get(
+        "/products"
+    )
+
+    if not isinstance(
+        products,
+        list,
+    ):
+        return []
+
+    return products
+
+
+def product_is_allowed(product):
+
+    if not isinstance(
+        product,
+        dict,
+    ):
+        return False
+
+    product_id = str(
+        product.get(
+            "id",
+            "",
+        )
+    ).upper()
+
+    quote = str(
+        product.get(
+            "quote_currency",
+            "",
+        )
+    ).upper()
+
+    if not product_id:
+        return False
+
+    # Use only USD / USDC quote markets.
+    if quote not in (
+        "USD",
+        "USDC",
+    ):
+        return False
+
+    # Skip restricted markets.
+    if product.get(
+        "trading_disabled",
+        False,
+    ):
+        return False
+
+    if product.get(
+        "cancel_only",
+        False,
+    ):
+        return False
+
+    if product.get(
+        "post_only",
+        False,
+    ):
+        return False
+
+    # Remove fiat-to-fiat markets.
+    base = str(
+        product.get(
+            "base_currency",
+            "",
+        )
+    ).upper()
+
+    fiat_like = {
+        "USD",
+        "USDC",
+        "USDT",
+        "EUR",
+        "GBP",
+        "CAD",
+        "AUD",
+    }
+
+    if base in fiat_like:
+        return False
+
+    return True
+
+
+# ============================================================
+# MARKET QUALITY
+# ============================================================
+
+def get_market_snapshot(
+    product_id,
+):
+
+    try:
+
+        ticker = coinbase_get(
+            f"/products/{product_id}/ticker"
+        )
+
+        stats = coinbase_get(
+            f"/products/{product_id}/stats"
+        )
+
+        last = float(
+            ticker.get(
+                "price",
+                0,
+            )
+            or 0
+        )
+
+        bid = float(
+            ticker.get(
+                "bid",
+                0,
+            )
+            or 0
+        )
+
+        ask = float(
+            ticker.get(
+                "ask",
+                0,
+            )
+            or 0
+        )
+
+        base_volume = float(
+            stats.get(
+                "volume",
+                0,
+            )
+            or 0
+        )
+
+        if last <= 0:
+            return None
+
+        # Approximate quote/USD volume.
+        quote_volume = (
+            base_volume
+            * last
+        )
+
+        spread_pct = 999.0
+
+        if (
+            bid > 0
+            and ask > 0
+            and ask >= bid
+        ):
+
+            midpoint = (
+                bid + ask
+            ) / 2
+
+            if midpoint > 0:
+
+                spread_pct = (
+                    (ask - bid)
+                    / midpoint
+                    * 100
+                )
+
+        return {
+            "product_id": product_id,
+            "last": last,
+            "bid": bid,
+            "ask": ask,
+            "quote_volume": (
+                quote_volume
+            ),
+            "spread_pct": (
+                spread_pct
+            ),
+        }
+
+    except Exception as error:
+
+        log(
+            f"{product_id} | "
+            f"Snapshot error | "
+            f"{error}"
+        )
+
+        return None
+
+
+# ============================================================
+# DISCOVER TOP LIQUID MARKETS
+# ============================================================
+
+def discover_markets():
+
+    global _cached_markets
+    global _cached_markets_at
+
+    now = time.time()
+
+    cache_age = (
+        now
+        - _cached_markets_at
+    )
+
+    max_age = (
+        MARKET_REFRESH_MINUTES
+        * 60
+    )
+
+    if (
+        _cached_markets
+        and cache_age < max_age
+    ):
+
+        return list(
+            _cached_markets
+        )
+
+    log(
+        "DISCOVERING COINBASE MARKETS"
+    )
+
+    products = (
+        get_coinbase_products()
+    )
+
+    eligible_products = [
+        product
+        for product in products
+        if product_is_allowed(
+            product
+        )
+    ]
+
+    log(
+        f"Coinbase products="
+        f"{len(products)} | "
+        f"Eligible="
+        f"{len(eligible_products)}"
+    )
+
+    quality_markets = []
+
+    for product in eligible_products:
+
+        product_id = (
+            product["id"]
+        )
+
+        snapshot = (
+            get_market_snapshot(
+                product_id
+            )
+        )
+
+        if snapshot is None:
+            continue
+
+        if (
+            snapshot[
+                "quote_volume"
+            ]
+            < MIN_QUOTE_VOLUME_USD
+        ):
+            continue
+
+        if (
+            snapshot[
+                "spread_pct"
+            ]
+            > MAX_SPREAD_PCT
+        ):
+            continue
+
+        quality_markets.append(
+            snapshot
+        )
+
+    quality_markets.sort(
+        key=lambda item: (
+            item[
+                "quote_volume"
+            ]
+        ),
+        reverse=True,
+    )
+
+    quality_markets = (
+        quality_markets[
+            :MAX_SCAN_MARKETS
+        ]
+    )
+
+    _cached_markets = [
+        market[
+            "product_id"
+        ]
+        for market
+        in quality_markets
+    ]
+
+    _cached_markets_at = now
+
+    log(
+        "QUALITY MARKET UNIVERSE | "
+        f"{len(_cached_markets)} markets"
+    )
+
+    for market in quality_markets:
+
+        log(
+            f"{market['product_id']} | "
+            f"24hApproxUSD="
+            f"{market['quote_volume']:,.0f} | "
+            f"Spread="
+            f"{market['spread_pct']:.4f}%"
+        )
+
+    return list(
+        _cached_markets
+    )
+
+
+# ============================================================
+# COINBASE PRODUCT -> EXISTING SYMBOL FORMAT
+# ============================================================
+
+def product_to_symbol(
+    product_id,
+):
+
+    product_id = str(
+        product_id
+    ).upper()
+
+    if "-" not in product_id:
+        return None
+
+    base, quote = (
+        product_id.split(
+            "-",
+            1,
+        )
+    )
+
+    # market_data.py currently maps
+    # BTCUSDT -> BTC-USD, etc.
+    if quote in (
+        "USD",
+        "USDC",
+    ):
+
+        return (
+            f"{base}USDT"
+        )
+
+    return None
+
+
+# ============================================================
+# CANDLES
+# ============================================================
+
+def get_market_candles(
+    symbol,
+):
 
     return get_candles(
         exchange="PUBLIC",
         symbol=symbol,
-        timeframe_minutes=TIMEFRAME_MINUTES,
+        timeframe_minutes=(
+            TIMEFRAME_MINUTES
+        ),
         limit=CANDLE_LIMIT,
         api_key="",
         api_secret="",
@@ -280,30 +665,54 @@ def get_market_candles(symbol):
 
 
 # ============================================================
-# SCAN ONE MARKET
+# ANALYSE MARKET
 # ============================================================
 
-def analyse_market(symbol):
+def analyse_market(
+    product_id,
+):
+
+    symbol = product_to_symbol(
+        product_id
+    )
+
+    if not symbol:
+
+        return {
+            "product_id": product_id,
+            "valid": False,
+            "reason": (
+                "Unsupported symbol mapping"
+            ),
+        }
 
     try:
 
-        candles = get_market_candles(
-            symbol
+        candles = (
+            get_market_candles(
+                symbol
+            )
         )
 
         if candles is None:
 
             return {
+                "product_id": (
+                    product_id
+                ),
                 "symbol": symbol,
                 "valid": False,
                 "reason": (
-                    "No market data"
+                    "No candles"
                 ),
             }
 
         if len(candles) < 50:
 
             return {
+                "product_id": (
+                    product_id
+                ),
                 "symbol": symbol,
                 "valid": False,
                 "reason": (
@@ -311,43 +720,58 @@ def analyse_market(symbol):
                 ),
             }
 
-        current_price = float(
-            candles["close"].iloc[-1]
+        price = float(
+            candles[
+                "close"
+            ].iloc[-1]
         )
 
-        signal_data = generate_signal(
-            candles
+        signal_data = (
+            generate_signal(
+                candles
+            )
         )
 
-        signal = signal_data.get(
-            "signal",
-            "NO TRADE",
+        signal = (
+            signal_data.get(
+                "signal",
+                "NO TRADE",
+            )
         )
 
-        score = signal_data.get(
-            "score",
-            0,
+        score = float(
+            signal_data.get(
+                "score",
+                0,
+            )
         )
 
-        rsi = signal_data.get(
-            "rsi",
-            None,
+        rsi = (
+            signal_data.get(
+                "rsi"
+            )
         )
 
-        macd = signal_data.get(
-            "macd",
-            None,
+        macd = (
+            signal_data.get(
+                "macd"
+            )
         )
 
-        reason = signal_data.get(
-            "reason",
-            "",
+        reason = (
+            signal_data.get(
+                "reason",
+                "",
+            )
         )
 
         return {
+            "product_id": (
+                product_id
+            ),
             "symbol": symbol,
             "valid": True,
-            "price": current_price,
+            "price": price,
             "signal": signal,
             "score": score,
             "rsi": rsi,
@@ -358,6 +782,7 @@ def analyse_market(symbol):
     except Exception as error:
 
         return {
+            "product_id": product_id,
             "symbol": symbol,
             "valid": False,
             "reason": str(error),
@@ -365,10 +790,14 @@ def analyse_market(symbol):
 
 
 # ============================================================
-# SCAN ALL MARKETS
+# SCAN ALL QUALITY MARKETS
 # ============================================================
 
 def scan_all_markets():
+
+    market_ids = (
+        discover_markets()
+    )
 
     results = []
 
@@ -377,17 +806,21 @@ def scan_all_markets():
     )
 
     log(
-        f"SCANNING {len(MARKETS)} MARKETS"
+        f"AI SCANNING "
+        f"{len(market_ids)} "
+        f"LIQUID MARKETS"
     )
 
     log(
         "========================================"
     )
 
-    for symbol in MARKETS:
+    for product_id in market_ids:
 
-        result = analyse_market(
-            symbol
+        result = (
+            analyse_market(
+                product_id
+            )
         )
 
         results.append(
@@ -399,15 +832,17 @@ def scan_all_markets():
         ):
 
             log(
-                f"{symbol} | "
-                f"DATA ERROR | "
+                f"{product_id} | "
+                f"SKIP | "
                 f"{result.get('reason')}"
             )
 
             continue
 
-        rsi = result.get(
-            "rsi"
+        rsi = (
+            result.get(
+                "rsi"
+            )
         )
 
         rsi_text = (
@@ -417,13 +852,13 @@ def scan_all_markets():
         )
 
         log(
-            f"{symbol} | "
+            f"{product_id} | "
             f"Price="
-            f"{result['price']:.4f} | "
+            f"{result['price']:.6f} | "
             f"Signal="
             f"{result['signal']} | "
             f"Score="
-            f"{result['score']} | "
+            f"{result['score']:+.0f} | "
             f"RSI="
             f"{rsi_text} | "
             f"{result['reason']}"
@@ -433,10 +868,12 @@ def scan_all_markets():
 
 
 # ============================================================
-# SELECT STRONGEST CONFIRMED SIGNAL
+# SELECT BEST CONFIRMED SETUP
 # ============================================================
 
-def select_best_setup(results):
+def select_best_setup(
+    results,
+):
 
     confirmed = []
 
@@ -445,7 +882,6 @@ def select_best_setup(results):
         if not result.get(
             "valid"
         ):
-
             continue
 
         signal = result.get(
@@ -456,26 +892,17 @@ def select_best_setup(results):
             "BUY",
             "SELL",
         ):
-
             continue
 
-        try:
-
-            score = float(
+        result[
+            "absolute_score"
+        ] = abs(
+            float(
                 result.get(
                     "score",
                     0,
                 )
             )
-
-        except Exception:
-
-            score = 0.0
-
-        result[
-            "absolute_score"
-        ] = abs(
-            score
         )
 
         confirmed.append(
@@ -483,7 +910,6 @@ def select_best_setup(results):
         )
 
     if not confirmed:
-
         return None
 
     confirmed.sort(
@@ -504,10 +930,11 @@ def select_best_setup(results):
 
 def monitor_position():
 
-    position = paper.get_position()
+    position = (
+        paper.get_position()
+    )
 
     if not position:
-
         return False
 
     symbol = position.get(
@@ -517,13 +944,15 @@ def monitor_position():
     if not symbol:
 
         log(
-            "Open position has no symbol."
+            "Stored position has no symbol."
         )
 
         return True
 
-    candles = get_market_candles(
-        symbol
+    candles = (
+        get_market_candles(
+            symbol
+        )
     )
 
     if (
@@ -533,18 +962,21 @@ def monitor_position():
 
         log(
             f"{symbol} | "
-            "Could not update "
-            "open position price."
+            "Could not monitor position."
         )
 
         return True
 
     current_price = float(
-        candles["close"].iloc[-1]
+        candles[
+            "close"
+        ].iloc[-1]
     )
 
-    result = paper.update_price(
-        current_price
+    result = (
+        paper.update_price(
+            current_price
+        )
     )
 
     if (
@@ -557,7 +989,6 @@ def monitor_position():
 
         log(
             "PAPER TRADE CLOSED | "
-            f"Symbol="
             f"{symbol} | "
             f"Side="
             f"{result.get('side')} | "
@@ -566,11 +997,11 @@ def monitor_position():
             f"Exit="
             f"{result.get('exit_price')} | "
             f"PnL="
-            f"{result.get('pnl')} | "
+            f"{result.get('pnl'):.2f} | "
             f"Reason="
             f"{result.get('reason')} | "
             f"Balance="
-            f"{result.get('balance')}"
+            f"{result.get('balance'):.2f}"
         )
 
         return False
@@ -589,7 +1020,7 @@ def monitor_position():
             f"Entry="
             f"{current_position.get('entry_price')} | "
             f"Current="
-            f"{current_price:.4f} | "
+            f"{current_price:.6f} | "
             f"TP="
             f"{current_position.get('take_profit')} | "
             f"SL="
@@ -600,7 +1031,7 @@ def monitor_position():
 
 
 # ============================================================
-# OPEN BEST PAPER TRADE
+# OPEN BEST TRADE
 # ============================================================
 
 def open_best_trade(
@@ -616,35 +1047,36 @@ def open_best_trade(
         "signal"
     ]
 
-    entry_price = float(
+    price = float(
         setup[
             "price"
         ]
     )
 
-    score = setup.get(
-        "score",
-        0,
+    score = float(
+        setup.get(
+            "score",
+            0,
+        )
     )
 
     log(
-        "BEST SETUP FOUND | "
-        f"{symbol} | "
-        f"Signal="
+        "BEST SETUP | "
+        f"{setup['product_id']} | "
         f"{signal} | "
-        f"Score="
-        f"{score} | "
-        f"Price="
-        f"{entry_price:.4f}"
+        f"Score={score:+.0f} | "
+        f"Price={price:.6f}"
     )
 
-    plan = calculate_trade_plan(
-        balance=balance,
-        entry_price=entry_price,
-        signal=signal,
-        risk_percent=RISK_PCT,
-        stop_loss_percent=SL_PCT,
-        take_profit_percent=TP_PCT,
+    plan = (
+        calculate_trade_plan(
+            balance=balance,
+            entry_price=price,
+            signal=signal,
+            risk_percent=RISK_PCT,
+            stop_loss_percent=SL_PCT,
+            take_profit_percent=TP_PCT,
+        )
     )
 
     if not validate_trade_plan(
@@ -652,8 +1084,7 @@ def open_best_trade(
     ):
 
         log(
-            "TRADE REJECTED BY "
-            "RISK MANAGER | "
+            "TRADE REJECTED | "
             f"{symbol} | "
             f"{plan}"
         )
@@ -663,7 +1094,7 @@ def open_best_trade(
     result = paper.open_trade(
         symbol=symbol,
         signal=signal,
-        entry_price=entry_price,
+        entry_price=price,
         quantity=plan[
             "quantity"
         ],
@@ -689,18 +1120,15 @@ def open_best_trade(
         log(
             "PAPER TRADE OPENED | "
             f"{symbol} | "
-            f"Side="
             f"{position['side']} | "
             f"Entry="
-            f"{position['entry_price']:.4f} | "
+            f"{position['entry_price']:.6f} | "
             f"Qty="
-            f"{position['quantity']:.6f} | "
+            f"{position['quantity']:.8f} | "
             f"TP="
-            f"{position['take_profit']:.4f} | "
+            f"{position['take_profit']:.6f} | "
             f"SL="
-            f"{position['stop_loss']:.4f} | "
-            f"Score="
-            f"{score}"
+            f"{position['stop_loss']:.6f}"
         )
 
     else:
@@ -713,51 +1141,40 @@ def open_best_trade(
 
 
 # ============================================================
-# ONE FULL TRADING CYCLE
+# FULL CYCLE
 # ============================================================
 
 def run_once():
 
     global _trading_paused
 
-    balance = paper.get_balance()
+    balance = (
+        paper.get_balance()
+    )
 
     check_circuit_breaker(
         balance
     )
 
-    # --------------------------------------------------------
-    # FIRST MANAGE EXISTING TRADE
-    # --------------------------------------------------------
-
+    # Existing position always gets priority.
     if paper.get_position():
 
         monitor_position()
 
         return
 
-    # --------------------------------------------------------
-    # DAILY LOSS PROTECTION
-    # --------------------------------------------------------
-
     if _trading_paused:
 
         log(
             "Trading paused by "
-            "daily loss circuit breaker."
+            "daily loss protection."
         )
 
         return
 
-    # --------------------------------------------------------
-    # SCAN ALL MARKETS
-    # --------------------------------------------------------
-
-    results = scan_all_markets()
-
-    # --------------------------------------------------------
-    # SELECT BEST CONFIRMED SETUP
-    # --------------------------------------------------------
+    results = (
+        scan_all_markets()
+    )
 
     best_setup = (
         select_best_setup(
@@ -769,14 +1186,10 @@ def run_once():
 
         log(
             "NO QUALIFYING TRADE | "
-            "All markets scanned."
+            "Quality universe scanned."
         )
 
         return
-
-    # --------------------------------------------------------
-    # OPEN STRONGEST PAPER SETUP
-    # --------------------------------------------------------
 
     open_best_trade(
         best_setup,
@@ -785,7 +1198,7 @@ def run_once():
 
 
 # ============================================================
-# MAIN WORKER
+# MAIN
 # ============================================================
 
 def main():
@@ -795,8 +1208,8 @@ def main():
     )
 
     log(
-        "PRO AI MULTI-MARKET "
-        "PAPER BOT STARTING"
+        "PRO AI DYNAMIC COINBASE "
+        "PAPER SCANNER STARTING"
     )
 
     log(
@@ -804,13 +1217,19 @@ def main():
     )
 
     log(
-        f"Markets: "
-        f"{', '.join(MARKETS)}"
+        f"Max markets scanned: "
+        f"{MAX_SCAN_MARKETS}"
     )
 
     log(
-        f"Total markets: "
-        f"{len(MARKETS)}"
+        f"Min approximate "
+        f"24h quote volume: "
+        f"${MIN_QUOTE_VOLUME_USD:,.0f}"
+    )
+
+    log(
+        f"Max spread: "
+        f"{MAX_SPREAD_PCT:.3f}%"
     )
 
     log(
@@ -819,22 +1238,17 @@ def main():
     )
 
     log(
-        f"Starting balance: "
-        f"${PAPER_BALANCE:.2f}"
-    )
-
-    log(
         f"Risk per trade: "
         f"{RISK_PCT}%"
     )
 
     log(
-        f"Take Profit: "
+        f"TP: "
         f"{TP_PCT}%"
     )
 
     log(
-        f"Stop Loss: "
+        f"SL: "
         f"{SL_PCT}%"
     )
 
@@ -877,7 +1291,7 @@ def main():
         except Exception as error:
 
             log(
-                "UNHANDLED WORKER ERROR | "
+                "UNHANDLED ERROR | "
                 f"{error}"
             )
 
