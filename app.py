@@ -1,25 +1,41 @@
 """
 app.py
 
-PRO AI QUANT TERMINAL V3
-Permanent Flicker-Reduced Institutional Version
+PRO AI QUANT TERMINAL V3.5
+CRYPTO + METALS PARALLEL PAPER TRADING PLATFORM
 
-Architecture:
-- Trading chart isolated inside its own Streamlit fragment
-- Chart does NOT auto-refresh
-- Changing chart market reruns ONLY chart fragment
-- Bot/data engine continues in separate timed fragment
-- PostgreSQL paper position preserved
-- Scanner / MTF / Risk engine preserved
-- Real orders disabled
+Architecture
+------------
+CRYPTO_MAIN
+    - Existing autonomous crypto scanner
+    - MTF confirmation
+    - Maximum 1 crypto position
 
-IMPORTANT:
-PAPER TRADING ONLY.
+METALS_MAIN
+    - Gold XAUUSD
+    - Silver XAGUSD
+    - 15m / 1h / 4h MTF
+    - ATR-based TP / SL
+    - Maximum 1 metals position
+
+TOTAL MAX POSITIONS
+    1 Crypto + 1 Metal
+
+IMPORTANT
+---------
+PAPER TRADING ONLY
+REAL ORDERS DISABLED
 """
 
 from datetime import datetime, timezone
 
+import pandas as pd
 import streamlit as st
+
+
+# ============================================================
+# CORE CONFIG
+# ============================================================
 
 from settings import (
     PAPER_TRADING,
@@ -30,6 +46,11 @@ from settings import (
     SCAN_MARKETS,
     TEST_MODE,
 )
+
+
+# ============================================================
+# CRYPTO ENGINE
+# ============================================================
 
 from market_data import (
     get_ticker,
@@ -53,7 +74,21 @@ from trade_engine import (
     get_current_price,
 )
 
-from paper_trader import PaperTrader
+
+# ============================================================
+# PAPER PORTFOLIO
+# ============================================================
+
+from paper_trader import (
+    PaperTrader,
+    CRYPTO_SLOT,
+    METALS_SLOT,
+)
+
+
+# ============================================================
+# V3 ANALYTICS
+# ============================================================
 
 from analytics_engine import (
     detect_market_regime,
@@ -64,13 +99,10 @@ from analytics_engine import (
     position_progress,
 )
 
-from asset_registry import (
-    get_assets_by_class,
-    ASSET_STOCK,
-    ASSET_METAL,
-    ASSET_INDEX,
-    ASSET_ETF,
-)
+
+# ============================================================
+# V3 UI
+# ============================================================
 
 from ui_v3 import (
     inject_v3_css,
@@ -80,18 +112,32 @@ from ui_v3 import (
     render_intelligence_cards,
     render_ai_core,
     render_scanner,
-    render_position,
     render_trade_analytics,
     render_future_module,
 )
 
 
 # ============================================================
-# PAGE CONFIG
+# METALS
+# ============================================================
+
+from metals_dashboard import (
+    render_metals_dashboard,
+)
+
+from metals_trade_engine import (
+    run_metals_cycle,
+    get_metals_trade_status,
+    get_metals_current_price,
+)
+
+
+# ============================================================
+# PAGE
 # ============================================================
 
 st.set_page_config(
-    page_title="PRO AI QUANT TERMINAL V3",
+    page_title="PRO AI QUANT TERMINAL V3.5",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -101,29 +147,52 @@ inject_v3_css()
 
 
 # ============================================================
+# CONSTANTS
+# ============================================================
+
+METALS_SCAN_SECONDS = 300
+
+NAV_ITEMS = [
+    "Overview",
+    "Crypto",
+    "Metals",
+    "Positions",
+    "Scanner",
+    "Analytics",
+    "Settings",
+]
+
+
+# ============================================================
 # SESSION STATE
 # ============================================================
 
 def init_state():
 
     defaults = {
+        "selected_asset_class": "Overview",
+        "chart_pair": "BTCUSDT",
+
         "bot_paused": False,
-        "scanner_results": [],
-        "strategy_result": None,
-        "bot_status": "STARTING",
-        "bot_market": "—",
-        "bot_signal": "NO TRADE",
-        "bot_score": 0.0,
-        "bot_confidence": 0.0,
-        "bot_reason": "",
+
+        "crypto_scanner_results": [],
+        "crypto_strategy_result": None,
+
+        "crypto_status": "STARTING",
+        "crypto_market": "—",
+        "crypto_signal": "NO TRADE",
+        "crypto_score": 0.0,
+        "crypto_confidence": 0.0,
+        "crypto_reason": "",
+
+        "metals_status": "STARTING",
+        "metals_scanner_results": [],
+        "metals_best_setup": None,
+        "metals_last_scan_at": None,
+
         "last_update": None,
         "bot_error": None,
 
-        # Static UI state
-        "chart_pair": "BTCUSDT",
-        "selected_asset_class": "Overview",
-
-        # Risk state
         "day_start_date": None,
         "day_start_balance": PAPER_BALANCE,
         "trading_paused_by_risk": False,
@@ -137,8 +206,10 @@ def init_state():
 
     if "paper_trader" not in st.session_state:
 
-        st.session_state.paper_trader = PaperTrader(
-            starting_balance=PAPER_BALANCE
+        st.session_state.paper_trader = (
+            PaperTrader(
+                starting_balance=PAPER_BALANCE
+            )
         )
 
 
@@ -146,32 +217,70 @@ init_state()
 
 
 # ============================================================
-# DAILY RISK
+# HELPERS
+# ============================================================
+
+def utc_now():
+
+    return datetime.now(
+        timezone.utc
+    )
+
+
+def safe_float(
+    value,
+    default=0.0,
+):
+
+    try:
+
+        if value is None:
+            return default
+
+        return float(value)
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
+        return default
+
+
+# ============================================================
+# DAILY PORTFOLIO RISK
 # ============================================================
 
 def update_daily_risk():
 
-    trader = st.session_state.paper_trader
+    trader = (
+        st.session_state.paper_trader
+    )
 
     balance = trader.get_balance()
 
-    today = datetime.now(
-        timezone.utc
-    ).date()
+    today = utc_now().date()
 
     if (
         st.session_state.day_start_date
         != today
     ):
 
-        st.session_state.day_start_date = today
+        st.session_state.day_start_date = (
+            today
+        )
 
-        st.session_state.day_start_balance = balance
+        st.session_state.day_start_balance = (
+            balance
+        )
 
-        st.session_state.trading_paused_by_risk = False
+        st.session_state.trading_paused_by_risk = (
+            False
+        )
 
-    start_balance = float(
-        st.session_state.day_start_balance
+    start_balance = safe_float(
+        st.session_state.day_start_balance,
+        PAPER_BALANCE,
     )
 
     drawdown = 0.0
@@ -187,20 +296,29 @@ def update_daily_risk():
             * 100
         )
 
-    st.session_state.current_drawdown = drawdown
+    st.session_state.current_drawdown = (
+        drawdown
+    )
 
-    if drawdown >= MAX_DAILY_LOSS_PCT:
+    if (
+        drawdown
+        >= MAX_DAILY_LOSS_PCT
+    ):
 
-        st.session_state.trading_paused_by_risk = True
+        st.session_state.trading_paused_by_risk = (
+            True
+        )
 
     return drawdown
 
 
 # ============================================================
-# MARKET ANALYTICS
+# CRYPTO MARKET ANALYTICS
 # ============================================================
 
-def get_regime_data(symbol):
+def get_regime_data(
+    symbol,
+):
 
     try:
 
@@ -235,32 +353,35 @@ def get_regime_data(symbol):
         )
 
         return {
-            "regime": regime.get(
-                "regime",
-                "UNKNOWN",
-            ),
-
-            "trend": regime.get(
-                "trend",
-                "UNKNOWN",
-            ),
-
-            "atr_pct": float(
+            "regime":
                 regime.get(
-                    "atr_pct",
-                    0.0,
-                )
-            ),
+                    "regime",
+                    "UNKNOWN",
+                ),
 
-            "momentum": float(
-                momentum
-            ),
+            "trend":
+                regime.get(
+                    "trend",
+                    "UNKNOWN",
+                ),
+
+            "atr_pct":
+                safe_float(
+                    regime.get(
+                        "atr_pct"
+                    )
+                ),
+
+            "momentum":
+                safe_float(
+                    momentum
+                ),
         }
 
     except Exception as error:
 
         print(
-            f"[REGIME ERROR] "
+            "[REGIME ERROR] "
             f"{symbol}: {error}",
             flush=True,
         )
@@ -274,7 +395,7 @@ def get_regime_data(symbol):
 
 
 # ============================================================
-# CORRELATION CACHE
+# CRYPTO CORRELATION
 # ============================================================
 
 @st.cache_data(
@@ -315,125 +436,122 @@ def build_crypto_correlation():
 
 
 # ============================================================
-# BOT CYCLE
+# CRYPTO BOT CYCLE
 # ============================================================
 
-def run_bot_cycle():
+def run_crypto_cycle():
 
-    trader = st.session_state.paper_trader
-
-    now = datetime.now(
-        timezone.utc
+    trader = (
+        st.session_state.paper_trader
     )
+
+    now = utc_now()
 
     try:
 
-        st.session_state.bot_error = None
-
-        update_daily_risk()
-
         # ----------------------------------------------------
-        # OPEN POSITION HAS FIRST PRIORITY
+        # EXISTING CRYPTO POSITION
         # ----------------------------------------------------
 
-        position = trader.get_position()
-
-        if position:
-
-            symbol = position.get(
-                "symbol",
-                "—",
+        crypto_position = (
+            trader.get_position(
+                CRYPTO_SLOT
             )
+        )
 
-            st.session_state.bot_market = symbol
+        if crypto_position:
+
+            st.session_state.crypto_market = (
+                crypto_position.get(
+                    "symbol",
+                    "—",
+                )
+            )
 
             result = monitor_open_position(
                 trader
             )
 
-            status = result.get(
-                "status"
-            )
+            if result is None:
 
-            if status == "CLOSED":
-
-                st.session_state.bot_status = (
-                    "TRADE CLOSED"
-                )
-
-                st.session_state.bot_signal = (
-                    "NO TRADE"
-                )
-
-                st.session_state.bot_score = 0.0
-
-                st.session_state.bot_confidence = 0.0
-
-            elif status == "OPEN":
-
-                st.session_state.bot_status = (
-                    "POSITION OPEN"
+                st.session_state.crypto_status = (
+                    "POSITION MONITORING"
                 )
 
             else:
 
-                st.session_state.bot_status = (
-                    result.get(
-                        "status",
-                        "POSITION MONITORING",
-                    )
+                status = result.get(
+                    "status"
                 )
 
-            st.session_state.last_update = (
-                now.isoformat()
-            )
+                if status == "CLOSED":
+
+                    st.session_state.crypto_status = (
+                        "TRADE CLOSED"
+                    )
+
+                    st.session_state.crypto_signal = (
+                        "NO TRADE"
+                    )
+
+                    st.session_state.crypto_score = (
+                        0.0
+                    )
+
+                    st.session_state.crypto_confidence = (
+                        0.0
+                    )
+
+                elif status == "OPEN":
+
+                    st.session_state.crypto_status = (
+                        "POSITION OPEN"
+                    )
+
+                else:
+
+                    st.session_state.crypto_status = (
+                        status
+                        or "POSITION MONITORING"
+                    )
 
             return
 
         # ----------------------------------------------------
-        # USER PAUSE
+        # PAUSE / RISK
         # ----------------------------------------------------
 
         if st.session_state.bot_paused:
 
-            st.session_state.bot_status = (
-                "PAUSED BY USER"
-            )
-
-            st.session_state.last_update = (
-                now.isoformat()
+            st.session_state.crypto_status = (
+                "PAUSED"
             )
 
             return
 
-        # ----------------------------------------------------
-        # DAILY LOSS PROTECTION
-        # ----------------------------------------------------
+        if (
+            st.session_state
+            .trading_paused_by_risk
+        ):
 
-        if st.session_state.trading_paused_by_risk:
-
-            st.session_state.bot_status = (
+            st.session_state.crypto_status = (
                 "DAILY LOSS LIMIT HIT"
             )
 
-            st.session_state.last_update = (
-                now.isoformat()
-            )
-
             return
 
         # ----------------------------------------------------
-        # SCANNER
+        # SCAN
         # ----------------------------------------------------
 
-        st.session_state.bot_status = (
+        st.session_state.crypto_status = (
             f"SCANNING "
             f"{len(SCAN_MARKETS)} MARKETS"
         )
 
         results = scan_markets()
 
-        st.session_state.scanner_results = (
+        st.session_state.crypto_scanner_results = (
             results
         )
 
@@ -451,56 +569,57 @@ def run_bot_cycle():
 
         if strongest:
 
-            st.session_state.bot_market = (
+            st.session_state.crypto_market = (
                 strongest.get(
                     "symbol",
                     "—",
                 )
             )
 
-            st.session_state.bot_signal = (
+            st.session_state.crypto_signal = (
                 strongest.get(
                     "signal",
                     "NO TRADE",
                 )
             )
 
-            st.session_state.bot_score = float(
-                strongest.get(
-                    "score",
-                    0.0,
+            st.session_state.crypto_score = (
+                safe_float(
+                    strongest.get(
+                        "score"
+                    )
                 )
             )
 
-            st.session_state.bot_reason = (
+            st.session_state.crypto_reason = (
                 strongest.get(
                     "reason",
                     "",
                 )
             )
 
+        # ----------------------------------------------------
+        # NO SETUP
+        # ----------------------------------------------------
+
         if best_setup is None:
 
-            st.session_state.bot_status = (
+            st.session_state.crypto_status = (
                 "NO QUALIFYING TRADE"
             )
 
-            st.session_state.bot_confidence = (
+            st.session_state.crypto_confidence = (
                 0.0
             )
 
-            st.session_state.strategy_result = (
+            st.session_state.crypto_strategy_result = (
                 None
-            )
-
-            st.session_state.last_update = (
-                now.isoformat()
             )
 
             return
 
         # ----------------------------------------------------
-        # MTF CONFIRMATION
+        # MTF
         # ----------------------------------------------------
 
         confirmation = (
@@ -509,39 +628,41 @@ def run_bot_cycle():
             )
         )
 
-        st.session_state.strategy_result = (
+        st.session_state.crypto_strategy_result = (
             confirmation
         )
 
-        st.session_state.bot_market = (
+        st.session_state.crypto_market = (
             best_setup.get(
                 "symbol",
                 "—",
             )
         )
 
-        st.session_state.bot_signal = (
+        st.session_state.crypto_signal = (
             best_setup.get(
                 "signal",
                 "NO TRADE",
             )
         )
 
-        st.session_state.bot_score = float(
-            best_setup.get(
-                "score",
-                0.0,
+        st.session_state.crypto_score = (
+            safe_float(
+                best_setup.get(
+                    "score"
+                )
             )
         )
 
-        st.session_state.bot_confidence = float(
-            confirmation.get(
-                "confidence",
-                0.0,
+        st.session_state.crypto_confidence = (
+            safe_float(
+                confirmation.get(
+                    "confidence"
+                )
             )
         )
 
-        st.session_state.bot_reason = (
+        st.session_state.crypto_reason = (
             confirmation.get(
                 "reason",
                 "",
@@ -553,68 +674,212 @@ def run_bot_cycle():
             False,
         ):
 
-            st.session_state.bot_status = (
+            st.session_state.crypto_status = (
                 "WAITING FOR MTF CONFIRMATION"
-            )
-
-            st.session_state.last_update = (
-                now.isoformat()
             )
 
             return
 
         # ----------------------------------------------------
-        # PAPER EXECUTION
+        # EXECUTE CRYPTO PAPER TRADE
         # ----------------------------------------------------
 
-        execution_result = (
-            open_approved_trade(
-                trader=trader,
-                setup=dict(
-                    best_setup
-                ),
-            )
+        execution = open_approved_trade(
+            trader=trader,
+            setup=dict(
+                best_setup
+            ),
         )
 
-        status = execution_result.get(
+        status = execution.get(
             "status",
             "UNKNOWN",
         )
 
         if status == "EXECUTED":
 
-            st.session_state.bot_status = (
+            st.session_state.crypto_status = (
                 "PAPER TRADE OPENED"
             )
 
         elif status == "REJECTED":
 
-            st.session_state.bot_status = (
+            st.session_state.crypto_status = (
                 "TRADE REJECTED BY RISK"
             )
 
         else:
 
-            st.session_state.bot_status = (
+            st.session_state.crypto_status = (
                 "TRADE SKIPPED"
             )
 
+    except Exception as error:
+
+        st.session_state.crypto_status = (
+            "ERROR"
+        )
+
+        st.session_state.bot_error = (
+            f"Crypto: {error}"
+        )
+
+    finally:
+
         st.session_state.last_update = (
             now.isoformat()
+        )
+
+
+# ============================================================
+# METALS SCAN TIMING
+# ============================================================
+
+def metals_scan_due():
+
+    last_value = (
+        st.session_state
+        .metals_last_scan_at
+    )
+
+    if not last_value:
+
+        return True
+
+    try:
+
+        last = datetime.fromisoformat(
+            last_value
+        )
+
+        age = (
+            utc_now()
+            - last
+        ).total_seconds()
+
+        return (
+            age
+            >= METALS_SCAN_SECONDS
+        )
+
+    except Exception:
+
+        return True
+
+
+# ============================================================
+# METALS BOT CYCLE
+# ============================================================
+
+def run_parallel_metals_cycle():
+
+    trader = (
+        st.session_state.paper_trader
+    )
+
+    # --------------------------------------------------------
+    # EXISTING METALS POSITION
+    #
+    # Monitor every normal POLL cycle.
+    # --------------------------------------------------------
+
+    metals_position = (
+        trader.get_position(
+            METALS_SLOT
+        )
+    )
+
+    if metals_position:
+
+        result = run_metals_cycle(
+            trader=trader,
+            risk_pct=1.0,
+        )
+
+        st.session_state.metals_status = (
+            result.get(
+                "status",
+                "MANAGING_POSITION",
+            )
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # PAUSE / GLOBAL DAILY RISK
+    # --------------------------------------------------------
+
+    if st.session_state.bot_paused:
+
+        st.session_state.metals_status = (
+            "PAUSED"
+        )
+
+        return
+
+    if (
+        st.session_state
+        .trading_paused_by_risk
+    ):
+
+        st.session_state.metals_status = (
+            "DAILY LOSS LIMIT HIT"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # NO NEED TO RUN 15m MTF SCANNER EVERY 60 SECONDS.
+    # Scan every five minutes while FLAT.
+    # --------------------------------------------------------
+
+    if not metals_scan_due():
+
+        st.session_state.metals_status = (
+            "WAITING FOR NEXT METALS SCAN"
+        )
+
+        return
+
+    try:
+
+        result = run_metals_cycle(
+            trader=trader,
+            risk_pct=1.0,
+        )
+
+        st.session_state.metals_last_scan_at = (
+            utc_now().isoformat()
+        )
+
+        st.session_state.metals_status = (
+            result.get(
+                "status",
+                "UNKNOWN",
+            )
+        )
+
+        st.session_state.metals_scanner_results = (
+            result.get(
+                "scanner_results",
+                [],
+            )
+        )
+
+        st.session_state.metals_best_setup = (
+            result.get(
+                "best_setup"
+            )
         )
 
     except Exception as error:
 
-        st.session_state.bot_status = (
+        st.session_state.metals_status = (
             "ERROR"
         )
 
-        st.session_state.bot_error = str(
-            error
-        )
-
-        st.session_state.last_update = (
-            now.isoformat()
+        st.session_state.bot_error = (
+            f"Metals: {error}"
         )
 
 
@@ -622,33 +887,20 @@ def run_bot_cycle():
 # HEADER
 # ============================================================
 
-utc_time = datetime.now(
-    timezone.utc
-).strftime(
-    "%H:%M:%S UTC"
-)
-
 render_header(
-    utc_time
+    utc_now().strftime(
+        "%H:%M:%S UTC"
+    )
 )
 
 
 # ============================================================
-# MAIN NAVIGATION
+# NAVIGATION
 # ============================================================
 
-selected_asset_class = st.radio(
-    "Asset Class",
-    [
-        "Overview",
-        "Crypto",
-        "Stocks",
-        "Metals",
-        "Indices",
-        "ETFs",
-        "Portfolio",
-        "AI Intelligence",
-    ],
+selected_page = st.radio(
+    "Navigation",
+    NAV_ITEMS,
     key="selected_asset_class",
     horizontal=True,
     label_visibility="collapsed",
@@ -656,40 +908,41 @@ selected_asset_class = st.radio(
 
 
 # ============================================================
-# PERMANENT ISOLATED CHART FRAGMENT
+# STABLE CRYPTO CHART
 # ============================================================
 
 @st.fragment
-def stable_chart_fragment():
+def stable_crypto_chart():
 
-    if st.session_state.selected_asset_class not in (
+    if selected_page not in (
         "Overview",
         "Crypto",
     ):
 
         return
 
-    chart_left, chart_right = st.columns(
+    left, right = st.columns(
         [
             1,
             3,
         ]
     )
 
-    with chart_left:
+    with left:
 
-        selected_pair = st.selectbox(
-            "Chart Market",
+        symbol = st.selectbox(
+            "Crypto Market",
             SCAN_MARKETS,
             key="chart_pair",
         )
 
         st.caption(
-            "Chart isolated from bot refresh"
+            "Isolated chart • "
+            "does not refresh with bot cycle"
         )
 
     ticker = get_ticker(
-        symbol=selected_pair,
+        symbol=symbol,
         exchange="PUBLIC",
         api_key="",
         api_secret="",
@@ -703,52 +956,41 @@ def stable_chart_fragment():
 
     if ticker:
 
-        last = float(
+        last = safe_float(
             ticker.get(
-                "last",
-                0.0,
+                "last"
             )
         )
 
-        change = float(
+        change = safe_float(
             ticker.get(
-                "change_pct",
-                0.0,
+                "change_pct"
             )
         )
 
-        high = float(
+        high = safe_float(
             ticker.get(
-                "high",
-                0.0,
+                "high"
             )
         )
 
-        low = float(
+        low = safe_float(
             ticker.get(
-                "low",
-                0.0,
+                "low"
             )
         )
 
-    with chart_right:
-
-        price_color = (
-            "🟢"
-            if change >= 0
-            else "🔴"
-        )
+    with right:
 
         st.caption(
-            f"{selected_pair}  •  "
-            f"${last:,.6f}  •  "
-            f"{price_color} "
-            f"{change:+.2f}%  •  "
-            f"H ${high:,.6f}  •  "
+            f"{symbol} • "
+            f"${last:,.6f} • "
+            f"{change:+.2f}% • "
+            f"H ${high:,.6f} • "
             f"L ${low:,.6f}"
         )
 
-    base = selected_pair.replace(
+    base = symbol.replace(
         "USDT",
         "",
     )
@@ -759,157 +1001,83 @@ def stable_chart_fragment():
 
     chart_html = f"""
     <!DOCTYPE html>
-
     <html>
-
     <head>
-
-        <meta
-            charset="UTF-8"
-        />
-
+        <meta charset="UTF-8">
         <style>
-
-            html,
-            body {{
-                margin: 0;
-                padding: 0;
-                width: 100%;
-                height: 100%;
-                overflow: hidden;
-                background: #070a0e;
+            html, body {{
+                margin:0;
+                padding:0;
+                width:100%;
+                height:100%;
+                overflow:hidden;
+                background:#070a0e;
             }}
-
-            #tradingview_chart {{
-                width: 100%;
-                height: 100%;
+            #tv {{
+                width:100%;
+                height:100%;
             }}
-
         </style>
-
     </head>
-
     <body>
 
-        <div
-            id="tradingview_chart">
-        </div>
+        <div id="tv"></div>
 
-        <script
-            src="https://s3.tradingview.com/tv.js">
-        </script>
+        <script src="https://s3.tradingview.com/tv.js"></script>
 
         <script>
-
-            new TradingView.widget({{
-
-                "autosize": true,
-
-                "symbol":
-                    "{tv_symbol}",
-
-                "interval":
-                    "15",
-
-                "timezone":
-                    "Etc/UTC",
-
-                "theme":
-                    "dark",
-
-                "style":
-                    "1",
-
-                "locale":
-                    "en",
-
-                "toolbar_bg":
-                    "#070a0e",
-
-                "enable_publishing":
-                    false,
-
-                "hide_top_toolbar":
-                    false,
-
-                "hide_side_toolbar":
-                    false,
-
-                "allow_symbol_change":
-                    true,
-
-                "save_image":
-                    false,
-
-                "container_id":
-                    "tradingview_chart",
-
-                "backgroundColor":
-                    "#070a0e",
-
-                "gridColor":
-                    "#151c23"
-
-            }});
-
+        new TradingView.widget({{
+            "autosize": true,
+            "symbol": "{tv_symbol}",
+            "interval": "15",
+            "timezone": "Etc/UTC",
+            "theme": "dark",
+            "style": "1",
+            "locale": "en",
+            "enable_publishing": false,
+            "hide_side_toolbar": false,
+            "allow_symbol_change": true,
+            "save_image": false,
+            "container_id": "tv",
+            "backgroundColor": "#070a0e",
+            "gridColor": "#151c23"
+        }});
         </script>
 
     </body>
-
     </html>
     """
 
-    # --------------------------------------------------------
-    # IMPORTANT:
-    # New Streamlit iframe API.
-    # No old st.components.v1.html().
-    # --------------------------------------------------------
-
-    if hasattr(
-        st,
-        "iframe",
-    ):
-
-        st.iframe(
-            chart_html,
-            height=440,
-            width="stretch",
-        )
-
-    else:
-
-        st.warning(
-            "Stable chart requires a newer "
-            "Streamlit version. "
-            "Bot remains active and safe."
-        )
-
-
-stable_chart_fragment()
-
-
-# ============================================================
-# BOT CONTROLS
-# ============================================================
-
-control_1, control_2, control_3, control_4 = (
-    st.columns(
-        [
-            1,
-            1,
-            1,
-            2,
-        ]
+    st.iframe(
+        chart_html,
+        height=440,
+        width="stretch",
     )
+
+
+stable_crypto_chart()
+
+
+# ============================================================
+# CONTROLS
+# ============================================================
+
+c1, c2, c3, c4 = st.columns(
+    [
+        1,
+        1,
+        1,
+        2,
+    ]
 )
 
 
-with control_1:
+with c1:
 
     if st.session_state.bot_paused:
 
         if st.button(
-            "▶ Resume Bot",
+            "▶ Resume Engines",
             width="stretch",
         ):
 
@@ -922,7 +1090,7 @@ with control_1:
     else:
 
         if st.button(
-            "⏸ Pause Bot",
+            "⏸ Pause Engines",
             width="stretch",
         ):
 
@@ -933,104 +1101,87 @@ with control_1:
             st.rerun()
 
 
-with control_2:
+with c2:
 
     if st.button(
-        "🔎 Force Scan",
+        "🔎 Force Crypto Scan",
         width="stretch",
     ):
 
-        run_bot_cycle()
+        run_crypto_cycle()
 
         st.rerun()
 
 
-with control_3:
+with c3:
 
-    current_position = (
+    if st.button(
+        "🥇 Force Metals Scan",
+        width="stretch",
+    ):
+
+        st.session_state.metals_last_scan_at = (
+            None
+        )
+
+        run_parallel_metals_cycle()
+
+        st.rerun()
+
+
+with c4:
+
+    portfolio = (
         st.session_state
         .paper_trader
-        .get_position()
-    )
-
-    if st.button(
-        "✖ Close Paper Trade",
-        disabled=(
-            current_position
-            is None
-        ),
-        width="stretch",
-    ):
-
-        result = (
-            manual_close_position(
-                st.session_state
-                .paper_trader
-            )
-        )
-
-        if result.get(
-            "status"
-        ) == "CLOSED":
-
-            st.success(
-                "Paper position closed."
-            )
-
-        else:
-
-            st.warning(
-                str(result)
-            )
-
-        st.rerun()
-
-
-with control_4:
-
-    management = (
-        trade_management_snapshot(
-            st.session_state
-                .paper_trader
-        )
+        .get_portfolio_snapshot()
     )
 
     st.caption(
-        "PAPER MODE • "
-        f"RISK "
-        f"{management['risk_pct']}% • "
-        f"TP "
-        f"{management['active_tp_pct']}% • "
-        f"SL "
-        f"{management['active_sl_pct']}% • "
-        f"TEST MODE {TEST_MODE} • "
+        "PAPER ONLY • "
+        f"OPEN POSITIONS "
+        f"{portfolio['open_position_count']}/2 • "
+        "1 CRYPTO + 1 METAL • "
         "REAL EXECUTION OFF"
     )
 
 
 # ============================================================
-# LIVE BOT FRAGMENT
+# LIVE ENGINE
 # ============================================================
 
 @st.fragment(
     run_every=f"{POLL_SECONDS}s"
 )
-def live_bot_fragment():
-
-    if PAPER_TRADING:
-
-        run_bot_cycle()
+def live_engine():
 
     trader = (
         st.session_state.paper_trader
     )
 
-    balance = (
-        trader.get_balance()
+    st.session_state.bot_error = None
+
+    update_daily_risk()
+
+    if PAPER_TRADING:
+
+        # Independent engines.
+        run_crypto_cycle()
+
+        run_parallel_metals_cycle()
+
+    balance = trader.get_balance()
+
+    crypto_position = (
+        trader.get_position(
+            CRYPTO_SLOT
+        )
     )
 
-    position = (
-        trader.get_position()
+    metals_position = (
+        trader.get_position(
+            METALS_SLOT
+        )
     )
 
     history = (
@@ -1038,271 +1189,276 @@ def live_bot_fragment():
     )
 
     drawdown = (
-        update_daily_risk()
+        st.session_state
+        .current_drawdown
     )
 
     total_pnl = sum(
-        float(
+        safe_float(
             trade.get(
-                "pnl",
-                0.0,
+                "pnl"
             )
         )
         for trade in history
     )
 
     # --------------------------------------------------------
-    # MARKET STRIP
+    # TOP STATUS
     # --------------------------------------------------------
 
     render_market_strip(
         scanner_count=len(
             SCAN_MARKETS
         ),
-
         bot_market=(
-            st.session_state.bot_market
+            st.session_state
+            .crypto_market
         ),
-
         bot_status=(
-            st.session_state.bot_status
+            "CRYPTO: "
+            f"{st.session_state.crypto_status}"
+            " | METALS: "
+            f"{st.session_state.metals_status}"
         ),
-
         poll_seconds=POLL_SECONDS,
     )
 
-    # --------------------------------------------------------
-    # TOP METRICS
-    # --------------------------------------------------------
-
     render_top_metrics(
         equity=balance,
-
         realized_pnl=total_pnl,
-
         closed_trades=len(
             history
         ),
-
         drawdown=drawdown,
-
-        ai_score=float(
-            st.session_state.bot_score
+        ai_score=(
+            st.session_state
+            .crypto_score
         ),
-
-        mtf_confidence=float(
-            st.session_state.bot_confidence
+        mtf_confidence=(
+            st.session_state
+            .crypto_confidence
         ),
     )
 
-    # --------------------------------------------------------
-    # ACTIVE ANALYTICS MARKET
-    # --------------------------------------------------------
+    # ========================================================
+    # OVERVIEW
+    # ========================================================
 
-    if position:
+    if selected_page == "Overview":
+
+        st.subheader(
+            "⚡ Dual-Engine Status"
+        )
+
+        o1, o2 = st.columns(
+            2
+        )
+
+        with o1:
+
+            st.markdown(
+                "### ₿ Crypto Engine"
+            )
+
+            st.metric(
+                "Status",
+                st.session_state
+                .crypto_status,
+            )
+
+            st.metric(
+                "AI Score",
+                f"{st.session_state.crypto_score:+.1f}",
+            )
+
+            st.metric(
+                "MTF Confidence",
+                (
+                    f"{st.session_state.crypto_confidence:.1f}%"
+                ),
+            )
+
+            if crypto_position:
+
+                st.success(
+                    f"{crypto_position['symbol']} "
+                    f"{crypto_position['side']} "
+                    "is OPEN"
+                )
+
+            else:
+
+                st.info(
+                    "Crypto slot is available."
+                )
+
+        with o2:
+
+            st.markdown(
+                "### 🥇 Metals Engine"
+            )
+
+            st.metric(
+                "Status",
+                st.session_state
+                .metals_status,
+            )
+
+            best = (
+                st.session_state
+                .metals_best_setup
+            )
+
+            if best:
+
+                st.metric(
+                    "Best Metal",
+                    best.get(
+                        "symbol",
+                        "—",
+                    ),
+                )
+
+                st.metric(
+                    "Metal Signal",
+                    best.get(
+                        "signal",
+                        "NO TRADE",
+                    ),
+                )
+
+                st.metric(
+                    "Metal MTF",
+                    (
+                        f"{safe_float(best.get('mtf_confidence')):.1f}%"
+                    ),
+                )
+
+            if metals_position:
+
+                st.success(
+                    f"{metals_position['symbol']} "
+                    f"{metals_position['side']} "
+                    "is OPEN"
+                )
+
+            else:
+
+                st.info(
+                    "Metals slot is available."
+                )
+
+    # ========================================================
+    # CRYPTO
+    # ========================================================
+
+    elif selected_page == "Crypto":
 
         analytics_symbol = (
-            position.get(
+            crypto_position.get(
                 "symbol"
             )
+            if crypto_position
+            else (
+                st.session_state
+                .crypto_market
+                if (
+                    st.session_state
+                    .crypto_market
+                    not in (
+                        "",
+                        "—",
+                    )
+                )
+                else st.session_state
+                .chart_pair
+            )
         )
 
-    elif (
-        st.session_state.bot_market
-        not in (
-            "",
-            "—",
-        )
-    ):
-
-        analytics_symbol = (
-            st.session_state.bot_market
-        )
-
-    else:
-
-        analytics_symbol = (
-            st.session_state.chart_pair
-        )
-
-    regime_data = (
-        get_regime_data(
+        regime = get_regime_data(
             analytics_symbol
         )
-    )
 
-    intelligence = (
-        scanner_intelligence(
-            st.session_state
-                .scanner_results
-        )
-    )
-
-    breadth = intelligence.get(
-        "breadth",
-        {},
-    )
-
-    # --------------------------------------------------------
-    # INTELLIGENCE CARDS
-    # --------------------------------------------------------
-
-    render_intelligence_cards(
-        regime=regime_data[
-            "regime"
-        ],
-
-        trend=regime_data[
-            "trend"
-        ],
-
-        atr_pct=regime_data[
-            "atr_pct"
-        ],
-
-        momentum=regime_data[
-            "momentum"
-        ],
-
-        bullish_pct=float(
-            breadth.get(
-                "bullish_pct",
-                0.0,
-            )
-        ),
-
-        bearish_pct=float(
-            breadth.get(
-                "bearish_pct",
-                0.0,
-            )
-        ),
-    )
-
-    # --------------------------------------------------------
-    # OVERVIEW / CRYPTO
-    # --------------------------------------------------------
-
-    if (
-        st.session_state
-        .selected_asset_class
-        in (
-            "Overview",
-            "Crypto",
-        )
-    ):
-
-        left_ai, right_ai = (
-            st.columns(
-                [
-                    1.15,
-                    1,
-                ]
+        intelligence = (
+            scanner_intelligence(
+                st.session_state
+                .crypto_scanner_results
             )
         )
 
-        with left_ai:
-
-            render_ai_core(
-                score=float(
-                    st.session_state
-                        .bot_score
-                ),
-
-                mtf_confidence=float(
-                    st.session_state
-                        .bot_confidence
-                ),
-
-                regime=regime_data[
-                    "regime"
-                ],
-
-                trend=regime_data[
-                    "trend"
-                ],
-
-                risk_pct=RISK_PCT,
-
-                position_state=(
-                    position.get(
-                        "side",
-                        "OPEN",
-                    )
-                    if position
-                    else "FLAT"
-                ),
+        breadth = (
+            intelligence.get(
+                "breadth",
+                {},
             )
+        )
 
-        with right_ai:
+        render_intelligence_cards(
+            regime=regime[
+                "regime"
+            ],
+            trend=regime[
+                "trend"
+            ],
+            atr_pct=regime[
+                "atr_pct"
+            ],
+            momentum=regime[
+                "momentum"
+            ],
+            bullish_pct=safe_float(
+                breadth.get(
+                    "bullish_pct"
+                )
+            ),
+            bearish_pct=safe_float(
+                breadth.get(
+                    "bearish_pct"
+                )
+            ),
+        )
 
-            st.subheader(
-                "🧠 AI Decision State"
-            )
+        render_ai_core(
+            score=(
+                st.session_state
+                .crypto_score
+            ),
+            mtf_confidence=(
+                st.session_state
+                .crypto_confidence
+            ),
+            regime=regime[
+                "regime"
+            ],
+            trend=regime[
+                "trend"
+            ],
+            risk_pct=RISK_PCT,
+            position_state=(
+                crypto_position.get(
+                    "side"
+                )
+                if crypto_position
+                else "FLAT"
+            ),
+        )
 
-            st.code(
-                f"""
-MARKET:
-{st.session_state.bot_market}
-
-STATUS:
-{st.session_state.bot_status}
-
-SIGNAL:
-{st.session_state.bot_signal}
-
-AI SCORE:
-{st.session_state.bot_score}
-
-MTF CONFIDENCE:
-{st.session_state.bot_confidence}%
-
-REGIME:
-{regime_data['regime']}
-
-TREND:
-{regime_data['trend']}
-
-ATR:
-{regime_data['atr_pct']}%
-
-MOMENTUM:
-{regime_data['momentum']}%
-
-REASON:
-{st.session_state.bot_reason}
-
-LAST UPDATE:
-{st.session_state.last_update}
-""",
-                language="text",
-            )
-
-        # ----------------------------------------------------
-        # SCANNER
-        # ----------------------------------------------------
-
-        if position:
+        if crypto_position:
 
             st.info(
-                "Scanner waits while "
-                "the active paper position "
-                "is managed."
+                "Crypto scanner waits while "
+                "CRYPTO_MAIN is occupied."
             )
 
         else:
 
             render_scanner(
                 st.session_state
-                    .scanner_results
+                .crypto_scanner_results
             )
 
-        # ----------------------------------------------------
-        # CORRELATION
-        # ----------------------------------------------------
-
         st.subheader(
-            "🧬 Crypto Correlation Matrix"
+            "🧬 Crypto Correlation"
         )
 
         corr = (
@@ -1319,209 +1475,431 @@ LAST UPDATE:
                 width="stretch",
             )
 
+
+    # ========================================================
+    # METALS
+    # ========================================================
+
+    elif selected_page == "Metals":
+
+        render_metals_dashboard()
+
+        st.subheader(
+            "🥇 Gold / Silver AI Scanner"
+        )
+
+        metals_results = (
+            st.session_state
+            .metals_scanner_results
+        )
+
+        if metals_results:
+
+            rows = []
+
+            for item in metals_results:
+
+                rows.append(
+                    {
+                        "Market":
+                            item.get(
+                                "symbol"
+                            ),
+
+                        "Signal":
+                            item.get(
+                                "signal"
+                            ),
+
+                        "Score":
+                            item.get(
+                                "score"
+                            ),
+
+                        "MTF %":
+                            item.get(
+                                "mtf_confidence"
+                            ),
+
+                        "1H + 4H":
+                            item.get(
+                                "higher_tf_confirmed"
+                            ),
+
+                        "Approved":
+                            item.get(
+                                "approved"
+                            ),
+
+                        "Entry":
+                            item.get(
+                                "entry_price"
+                            ),
+
+                        "Reason":
+                            item.get(
+                                "reason"
+                            ),
+                    }
+                )
+
+            st.dataframe(
+                pd.DataFrame(
+                    rows
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+
+        else:
+
+            if metals_position:
+
+                st.info(
+                    "METALS_MAIN position is "
+                    "currently being managed."
+                )
+
+            else:
+
+                st.info(
+                    "Waiting for Metals scanner cycle."
+                )
+
+        if (
+            st.session_state
+            .metals_best_setup
+        ):
+
+            with st.expander(
+                "Metals MTF Details"
+            ):
+
+                st.json(
+                    st.session_state
+                    .metals_best_setup
+                )
+
+
+    # ========================================================
+    # POSITIONS
+    # ========================================================
+
+    elif selected_page == "Positions":
+
+        st.subheader(
+            "📌 Open Paper Positions"
+        )
+
+        positions = (
+            trader.get_positions()
+        )
+
+        if positions:
+
+            rows = []
+
+            for position in positions:
+
+                symbol = position.get(
+                    "symbol"
+                )
+
+                if (
+                    position.get(
+                        "slot"
+                    )
+                    == METALS_SLOT
+                ):
+
+                    current = (
+                        get_metals_current_price(
+                            symbol
+                        )
+                    )
+
+                else:
+
+                    current = (
+                        get_current_price(
+                            symbol
+                        )
+                    )
+
+                pnl_pct = 0.0
+
+                if (
+                    current
+                    and position.get(
+                        "entry_price"
+                    )
+                ):
+
+                    entry = safe_float(
+                        position.get(
+                            "entry_price"
+                        )
+                    )
+
+                    if (
+                        position.get(
+                            "side"
+                        )
+                        == "LONG"
+                    ):
+
+                        pnl_pct = (
+                            (
+                                current
+                                - entry
+                            )
+                            / entry
+                            * 100
+                        )
+
+                    else:
+
+                        pnl_pct = (
+                            (
+                                entry
+                                - current
+                            )
+                            / entry
+                            * 100
+                        )
+
+                rows.append(
+                    {
+                        "Slot":
+                            position.get(
+                                "slot"
+                            ),
+
+                        "Asset":
+                            position.get(
+                                "asset_class"
+                            ),
+
+                        "Symbol":
+                            symbol,
+
+                        "Side":
+                            position.get(
+                                "side"
+                            ),
+
+                        "Entry":
+                            position.get(
+                                "entry_price"
+                            ),
+
+                        "Current":
+                            current,
+
+                        "PnL %":
+                            round(
+                                pnl_pct,
+                                3,
+                            ),
+
+                        "TP":
+                            position.get(
+                                "take_profit"
+                            ),
+
+                        "SL":
+                            position.get(
+                                "stop_loss"
+                            ),
+
+                        "Quantity":
+                            position.get(
+                                "quantity"
+                            ),
+
+                        "Opened":
+                            position.get(
+                                "opened_at"
+                            ),
+                    }
+                )
+
+            st.dataframe(
+                pd.DataFrame(
+                    rows
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+
         else:
 
             st.info(
-                "Correlation data is building."
+                "No open paper positions."
             )
 
-    # --------------------------------------------------------
-    # ACTIVE POSITION
-    # --------------------------------------------------------
 
-    current_price = None
-    progress = None
+    # ========================================================
+    # SCANNER
+    # ========================================================
 
-    if position:
+    elif selected_page == "Scanner":
 
-        current_price = (
-            get_current_price(
-                position.get(
-                    "symbol"
-                )
-            )
+        st.subheader(
+            "🔎 Crypto Scanner"
         )
 
-        if current_price is not None:
+        render_scanner(
+            st.session_state
+            .crypto_scanner_results
+        )
 
-            progress = (
-                position_progress(
-                    position,
-                    current_price,
-                )
+        st.subheader(
+            "🥇 Metals Scanner"
+        )
+
+        if (
+            st.session_state
+            .metals_scanner_results
+        ):
+
+            st.dataframe(
+                pd.DataFrame(
+                    st.session_state
+                    .metals_scanner_results
+                ),
+                width="stretch",
+                hide_index=True,
             )
 
-    render_position(
-        position=position,
-        progress=progress,
-    )
+        else:
 
-    # --------------------------------------------------------
-    # TRADING ANALYTICS
-    # --------------------------------------------------------
+            st.info(
+                "No Metals scanner result yet."
+            )
 
-    statistics = (
-        trade_statistics(
-            history
-        )
-    )
 
-    render_trade_analytics(
-        statistics=statistics,
-        trade_history=history,
-    )
+    # ========================================================
+    # ANALYTICS
+    # ========================================================
 
-    # --------------------------------------------------------
-    # STOCKS
-    # --------------------------------------------------------
+    elif selected_page == "Analytics":
 
-    if (
-        st.session_state
-        .selected_asset_class
-        == "Stocks"
-    ):
-
-        stocks = (
-            get_assets_by_class(
-                ASSET_STOCK
+        statistics = (
+            trade_statistics(
+                history
             )
         )
 
-        render_future_module(
-            "STOCK MARKET ENGINE",
-            (
-                f"Registered assets: "
-                f"{', '.join(stocks)}"
-                "<br><br>"
-                "Stock data, market hours, "
-                "relative volume, VWAP, "
-                "sector strength and earnings "
-                "intelligence will connect "
-                "in the Stocks phase."
-            ),
+        render_trade_analytics(
+            statistics=statistics,
+            trade_history=history,
         )
 
-    # --------------------------------------------------------
-    # METALS
-    # --------------------------------------------------------
-
-    elif (
-        st.session_state
-        .selected_asset_class
-        == "Metals"
-    ):
-
-        metals = (
-            get_assets_by_class(
-                ASSET_METAL
+        crypto_history = (
+            trader.get_trade_history(
+                asset_class="CRYPTO"
             )
         )
 
-        render_future_module(
-            "METALS ENGINE",
-            (
-                f"Registered assets: "
-                f"{', '.join(metals)}"
-                "<br><br>"
-                "Gold and Silver registry ready. "
-                "Dedicated metals market-data "
-                "and risk engine comes next."
-            ),
-        )
-
-    # --------------------------------------------------------
-    # INDICES
-    # --------------------------------------------------------
-
-    elif (
-        st.session_state
-        .selected_asset_class
-        == "Indices"
-    ):
-
-        indices = (
-            get_assets_by_class(
-                ASSET_INDEX
+        metal_history = (
+            trader.get_trade_history(
+                asset_class="METAL"
             )
         )
 
-        render_future_module(
-            "INDEX INTELLIGENCE",
-            (
-                f"Registered indices: "
-                f"{', '.join(indices)}"
-            ),
+        a1, a2 = st.columns(
+            2
         )
 
-    # --------------------------------------------------------
-    # ETFs
-    # --------------------------------------------------------
+        with a1:
 
-    elif (
-        st.session_state
-        .selected_asset_class
-        == "ETFs"
-    ):
-
-        etfs = (
-            get_assets_by_class(
-                ASSET_ETF
+            st.metric(
+                "Crypto Closed Trades",
+                len(
+                    crypto_history
+                ),
             )
+
+        with a2:
+
+            st.metric(
+                "Metals Closed Trades",
+                len(
+                    metal_history
+                ),
+            )
+
+
+    # ========================================================
+    # SETTINGS
+    # ========================================================
+
+    elif selected_page == "Settings":
+
+        st.subheader(
+            "⚙️ Engine Configuration"
         )
 
-        render_future_module(
-            "ETF ENGINE",
-            (
-                f"Registered ETFs: "
-                f"{', '.join(etfs)}"
-            ),
+        s1, s2 = st.columns(
+            2
+        )
+
+        with s1:
+
+            st.markdown(
+                "### Crypto"
+            )
+
+            st.metric(
+                "Risk / Trade",
+                f"{RISK_PCT:.1f}%",
+            )
+
+            st.metric(
+                "Scanner Markets",
+                len(
+                    SCAN_MARKETS
+                ),
+            )
+
+            st.metric(
+                "Bot Poll",
+                f"{POLL_SECONDS}s",
+            )
+
+        with s2:
+
+            st.markdown(
+                "### Metals"
+            )
+
+            st.metric(
+                "Risk / Trade",
+                "1.0%",
+            )
+
+            st.metric(
+                "Markets",
+                "XAUUSD / XAGUSD",
+            )
+
+            st.metric(
+                "Scanner Rate",
+                f"{METALS_SCAN_SECONDS}s",
+            )
+
+        st.warning(
+            "Settings are currently read-only "
+            "for safety during paper validation."
+        )
+
+        st.success(
+            "REAL ORDERS DISABLED"
         )
 
     # --------------------------------------------------------
-    # PORTFOLIO
-    # --------------------------------------------------------
-
-    elif (
-        st.session_state
-        .selected_asset_class
-        == "Portfolio"
-    ):
-
-        render_future_module(
-            "PORTFOLIO INTELLIGENCE",
-            (
-                "Future portfolio layer: "
-                "multi-position exposure, "
-                "correlation-adjusted risk, "
-                "cross-asset allocation, "
-                "portfolio drawdown and "
-                "concentration control."
-            ),
-        )
-
-    # --------------------------------------------------------
-    # AI INTELLIGENCE
-    # --------------------------------------------------------
-
-    elif (
-        st.session_state
-        .selected_asset_class
-        == "AI Intelligence"
-    ):
-
-        render_future_module(
-            "AI INTELLIGENCE LAYER",
-            (
-                "Scanner score, "
-                "multi-timeframe confirmation, "
-                "market regime, volatility, "
-                "momentum and portfolio-risk "
-                "intelligence."
-            ),
-        )
-
-    # --------------------------------------------------------
-    # ERRORS
+    # ERROR
     # --------------------------------------------------------
 
     if st.session_state.bot_error:
@@ -1531,4 +1909,4 @@ LAST UPDATE:
         )
 
 
-live_bot_fragment()
+live_engine()
