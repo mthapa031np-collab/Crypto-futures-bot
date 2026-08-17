@@ -2,21 +2,32 @@
 app.py
 
 PRO AI QUANT TERMINAL V3.5
+
 CRYPTO + METALS PARALLEL PAPER TRADING PLATFORM
+WITH V3 CENTRAL CONTROL CENTER
 
 Architecture
 ------------
 CRYPTO_MAIN
-    - Existing autonomous crypto scanner
-    - MTF confirmation
-    - Maximum 1 crypto position
+    - Autonomous crypto scanner
+    - Multi-timeframe confirmation
+    - Maximum 1 Crypto position
 
 METALS_MAIN
     - Gold XAUUSD
     - Silver XAGUSD
     - 15m / 1h / 4h MTF
     - ATR-based TP / SL
-    - Maximum 1 metals position
+    - Maximum 1 Metals position
+
+CONTROL CENTER
+    - Persistent PostgreSQL-backed settings
+    - Crypto / Metals controls
+    - Risk configuration
+    - Scanner configuration
+    - System health
+    - API readiness
+    - Live execution hard lock
 
 TOTAL MAX POSITIONS
     1 Crypto + 1 Metal
@@ -34,7 +45,7 @@ import streamlit as st
 
 
 # ============================================================
-# CORE CONFIG
+# CORE SETTINGS
 # ============================================================
 
 from settings import (
@@ -49,7 +60,7 @@ from settings import (
 
 
 # ============================================================
-# CRYPTO ENGINE
+# CRYPTO DATA / ENGINE
 # ============================================================
 
 from market_data import (
@@ -69,8 +80,6 @@ from strategy_engine import (
 from trade_engine import (
     monitor_open_position,
     open_approved_trade,
-    manual_close_position,
-    trade_management_snapshot,
     get_current_price,
 )
 
@@ -96,7 +105,6 @@ from analytics_engine import (
     correlation_matrix,
     scanner_intelligence,
     trade_statistics,
-    position_progress,
 )
 
 
@@ -113,7 +121,6 @@ from ui_v3 import (
     render_ai_core,
     render_scanner,
     render_trade_analytics,
-    render_future_module,
 )
 
 
@@ -127,13 +134,21 @@ from metals_dashboard import (
 
 from metals_trade_engine import (
     run_metals_cycle,
-    get_metals_trade_status,
     get_metals_current_price,
 )
 
 
 # ============================================================
-# PAGE
+# V3 CONTROL CENTER
+# ============================================================
+
+from control_center_ui import (
+    render_control_center,
+)
+
+
+# ============================================================
+# PAGE CONFIG
 # ============================================================
 
 st.set_page_config(
@@ -147,10 +162,11 @@ inject_v3_css()
 
 
 # ============================================================
-# CONSTANTS
+# PLATFORM CONSTANTS
 # ============================================================
 
 METALS_SCAN_SECONDS = 300
+
 
 NAV_ITEMS = [
     "Overview",
@@ -170,14 +186,16 @@ NAV_ITEMS = [
 def init_state():
 
     defaults = {
+        # Navigation
         "selected_asset_class": "Overview",
         "chart_pair": "BTCUSDT",
 
+        # Legacy/runtime pause
         "bot_paused": False,
 
+        # Crypto engine
         "crypto_scanner_results": [],
         "crypto_strategy_result": None,
-
         "crypto_status": "STARTING",
         "crypto_market": "—",
         "crypto_signal": "NO TRADE",
@@ -185,14 +203,17 @@ def init_state():
         "crypto_confidence": 0.0,
         "crypto_reason": "",
 
+        # Metals engine
         "metals_status": "STARTING",
         "metals_scanner_results": [],
         "metals_best_setup": None,
         "metals_last_scan_at": None,
 
+        # General
         "last_update": None,
         "bot_error": None,
 
+        # Daily risk state
         "day_start_date": None,
         "day_start_balance": PAPER_BALANCE,
         "trading_paused_by_risk": False,
@@ -202,7 +223,10 @@ def init_state():
     for key, value in defaults.items():
 
         if key not in st.session_state:
-            st.session_state[key] = value
+
+            st.session_state[
+                key
+            ] = value
 
     if "paper_trader" not in st.session_state:
 
@@ -237,7 +261,9 @@ def safe_float(
         if value is None:
             return default
 
-        return float(value)
+        return float(
+            value
+        )
 
     except (
         TypeError,
@@ -257,9 +283,13 @@ def update_daily_risk():
         st.session_state.paper_trader
     )
 
-    balance = trader.get_balance()
+    balance = (
+        trader.get_balance()
+    )
 
-    today = utc_now().date()
+    today = (
+        utc_now().date()
+    )
 
     if (
         st.session_state.day_start_date
@@ -344,12 +374,16 @@ def get_regime_data(
                 "momentum": 0.0,
             }
 
-        regime = detect_market_regime(
-            candles
+        regime = (
+            detect_market_regime(
+                candles
+            )
         )
 
-        momentum = calculate_momentum(
-            candles
+        momentum = (
+            calculate_momentum(
+                candles
+            )
         )
 
         return {
@@ -445,12 +479,14 @@ def run_crypto_cycle():
         st.session_state.paper_trader
     )
 
-    now = utc_now()
+    now = (
+        utc_now()
+    )
 
     try:
 
         # ----------------------------------------------------
-        # EXISTING CRYPTO POSITION
+        # MANAGE EXISTING CRYPTO POSITION FIRST
         # ----------------------------------------------------
 
         crypto_position = (
@@ -468,8 +504,10 @@ def run_crypto_cycle():
                 )
             )
 
-            result = monitor_open_position(
-                trader
+            result = (
+                monitor_open_position(
+                    trader
+                )
             )
 
             if result is None:
@@ -480,8 +518,10 @@ def run_crypto_cycle():
 
             else:
 
-                status = result.get(
-                    "status"
+                status = (
+                    result.get(
+                        "status"
+                    )
                 )
 
                 if status == "CLOSED":
@@ -518,7 +558,7 @@ def run_crypto_cycle():
             return
 
         # ----------------------------------------------------
-        # PAUSE / RISK
+        # PAUSE
         # ----------------------------------------------------
 
         if st.session_state.bot_paused:
@@ -528,6 +568,10 @@ def run_crypto_cycle():
             )
 
             return
+
+        # ----------------------------------------------------
+        # DAILY LOSS PROTECTION
+        # ----------------------------------------------------
 
         if (
             st.session_state
@@ -541,7 +585,7 @@ def run_crypto_cycle():
             return
 
         # ----------------------------------------------------
-        # SCAN
+        # MULTI-MARKET SCANNER
         # ----------------------------------------------------
 
         st.session_state.crypto_status = (
@@ -549,7 +593,9 @@ def run_crypto_cycle():
             f"{len(SCAN_MARKETS)} MARKETS"
         )
 
-        results = scan_markets()
+        results = (
+            scan_markets()
+        )
 
         st.session_state.crypto_scanner_results = (
             results
@@ -559,13 +605,21 @@ def run_crypto_cycle():
             results
         )
 
-        strongest = summary.get(
-            "strongest_market"
+        strongest = (
+            summary.get(
+                "strongest_market"
+            )
         )
 
-        best_setup = summary.get(
-            "best_setup"
+        best_setup = (
+            summary.get(
+                "best_setup"
+            )
         )
+
+        # ----------------------------------------------------
+        # STRONGEST MARKET INFO
+        # ----------------------------------------------------
 
         if strongest:
 
@@ -619,7 +673,7 @@ def run_crypto_cycle():
             return
 
         # ----------------------------------------------------
-        # MTF
+        # MULTI-TIMEFRAME CONFIRMATION
         # ----------------------------------------------------
 
         confirmation = (
@@ -681,19 +735,23 @@ def run_crypto_cycle():
             return
 
         # ----------------------------------------------------
-        # EXECUTE CRYPTO PAPER TRADE
+        # PAPER EXECUTION
         # ----------------------------------------------------
 
-        execution = open_approved_trade(
-            trader=trader,
-            setup=dict(
-                best_setup
-            ),
+        execution = (
+            open_approved_trade(
+                trader=trader,
+                setup=dict(
+                    best_setup
+                ),
+            )
         )
 
-        status = execution.get(
-            "status",
-            "UNKNOWN",
+        status = (
+            execution.get(
+                "status",
+                "UNKNOWN",
+            )
         )
 
         if status == "EXECUTED":
@@ -748,8 +806,10 @@ def metals_scan_due():
 
     try:
 
-        last = datetime.fromisoformat(
-            last_value
+        last = (
+            datetime.fromisoformat(
+                last_value
+            )
         )
 
         age = (
@@ -768,7 +828,7 @@ def metals_scan_due():
 
 
 # ============================================================
-# METALS BOT CYCLE
+# PARALLEL METALS CYCLE
 # ============================================================
 
 def run_parallel_metals_cycle():
@@ -779,8 +839,6 @@ def run_parallel_metals_cycle():
 
     # --------------------------------------------------------
     # EXISTING METALS POSITION
-    #
-    # Monitor every normal POLL cycle.
     # --------------------------------------------------------
 
     metals_position = (
@@ -806,7 +864,7 @@ def run_parallel_metals_cycle():
         return
 
     # --------------------------------------------------------
-    # PAUSE / GLOBAL DAILY RISK
+    # PAUSE
     # --------------------------------------------------------
 
     if st.session_state.bot_paused:
@@ -816,6 +874,10 @@ def run_parallel_metals_cycle():
         )
 
         return
+
+    # --------------------------------------------------------
+    # DAILY LOSS PROTECTION
+    # --------------------------------------------------------
 
     if (
         st.session_state
@@ -829,8 +891,7 @@ def run_parallel_metals_cycle():
         return
 
     # --------------------------------------------------------
-    # NO NEED TO RUN 15m MTF SCANNER EVERY 60 SECONDS.
-    # Scan every five minutes while FLAT.
+    # WAIT UNTIL NEXT METALS SCAN
     # --------------------------------------------------------
 
     if not metals_scan_due():
@@ -840,6 +901,10 @@ def run_parallel_metals_cycle():
         )
 
         return
+
+    # --------------------------------------------------------
+    # SCAN + EXECUTE
+    # --------------------------------------------------------
 
     try:
 
@@ -895,7 +960,7 @@ render_header(
 
 
 # ============================================================
-# NAVIGATION
+# MAIN NAVIGATION
 # ============================================================
 
 selected_page = st.radio(
@@ -921,11 +986,13 @@ def stable_crypto_chart():
 
         return
 
-    left, right = st.columns(
-        [
-            1,
-            3,
-        ]
+    left, right = (
+        st.columns(
+            [
+                1,
+                3,
+            ]
+        )
     )
 
     with left:
@@ -990,9 +1057,11 @@ def stable_crypto_chart():
             f"L ${low:,.6f}"
         )
 
-    base = symbol.replace(
-        "USDT",
-        "",
+    base = (
+        symbol.replace(
+            "USDT",
+            "",
+        )
     )
 
     tv_symbol = (
@@ -1001,50 +1070,93 @@ def stable_crypto_chart():
 
     chart_html = f"""
     <!DOCTYPE html>
+
     <html>
+
     <head>
+
         <meta charset="UTF-8">
+
         <style>
-            html, body {{
-                margin:0;
-                padding:0;
-                width:100%;
-                height:100%;
-                overflow:hidden;
-                background:#070a0e;
+
+            html,
+            body {{
+                margin: 0;
+                padding: 0;
+                width: 100%;
+                height: 100%;
+                overflow: hidden;
+                background: #070a0e;
             }}
+
             #tv {{
-                width:100%;
-                height:100%;
+                width: 100%;
+                height: 100%;
             }}
+
         </style>
+
     </head>
+
     <body>
 
         <div id="tv"></div>
 
-        <script src="https://s3.tradingview.com/tv.js"></script>
+        <script
+            src="https://s3.tradingview.com/tv.js">
+        </script>
 
         <script>
+
         new TradingView.widget({{
+
             "autosize": true,
-            "symbol": "{tv_symbol}",
-            "interval": "15",
-            "timezone": "Etc/UTC",
-            "theme": "dark",
-            "style": "1",
-            "locale": "en",
-            "enable_publishing": false,
-            "hide_side_toolbar": false,
-            "allow_symbol_change": true,
-            "save_image": false,
-            "container_id": "tv",
-            "backgroundColor": "#070a0e",
-            "gridColor": "#151c23"
+
+            "symbol":
+                "{tv_symbol}",
+
+            "interval":
+                "15",
+
+            "timezone":
+                "Etc/UTC",
+
+            "theme":
+                "dark",
+
+            "style":
+                "1",
+
+            "locale":
+                "en",
+
+            "enable_publishing":
+                false,
+
+            "hide_side_toolbar":
+                false,
+
+            "allow_symbol_change":
+                true,
+
+            "save_image":
+                false,
+
+            "container_id":
+                "tv",
+
+            "backgroundColor":
+                "#070a0e",
+
+            "gridColor":
+                "#151c23"
+
         }});
+
         </script>
 
     </body>
+
     </html>
     """
 
@@ -1059,16 +1171,18 @@ stable_crypto_chart()
 
 
 # ============================================================
-# CONTROLS
+# QUICK ENGINE CONTROLS
 # ============================================================
 
-c1, c2, c3, c4 = st.columns(
-    [
-        1,
-        1,
-        1,
-        2,
-    ]
+c1, c2, c3, c4 = (
+    st.columns(
+        [
+            1,
+            1,
+            1,
+            2,
+        ]
+    )
 )
 
 
@@ -1147,7 +1261,7 @@ with c4:
 
 
 # ============================================================
-# LIVE ENGINE
+# LIVE DUAL-ENGINE FRAGMENT
 # ============================================================
 
 @st.fragment(
@@ -1159,18 +1273,29 @@ def live_engine():
         st.session_state.paper_trader
     )
 
-    st.session_state.bot_error = None
+    st.session_state.bot_error = (
+        None
+    )
 
     update_daily_risk()
 
+    # --------------------------------------------------------
+    # RUN BOTH ENGINES
+    # --------------------------------------------------------
+
     if PAPER_TRADING:
 
-        # Independent engines.
         run_crypto_cycle()
 
         run_parallel_metals_cycle()
 
-    balance = trader.get_balance()
+    # --------------------------------------------------------
+    # ACCOUNT / POSITIONS
+    # --------------------------------------------------------
+
+    balance = (
+        trader.get_balance()
+    )
 
     crypto_position = (
         trader.get_position(
@@ -1210,30 +1335,38 @@ def live_engine():
         scanner_count=len(
             SCAN_MARKETS
         ),
+
         bot_market=(
             st.session_state
             .crypto_market
         ),
+
         bot_status=(
             "CRYPTO: "
             f"{st.session_state.crypto_status}"
             " | METALS: "
             f"{st.session_state.metals_status}"
         ),
+
         poll_seconds=POLL_SECONDS,
     )
 
     render_top_metrics(
         equity=balance,
+
         realized_pnl=total_pnl,
+
         closed_trades=len(
             history
         ),
+
         drawdown=drawdown,
+
         ai_score=(
             st.session_state
             .crypto_score
         ),
+
         mtf_confidence=(
             st.session_state
             .crypto_confidence
@@ -1250,11 +1383,17 @@ def live_engine():
             "⚡ Dual-Engine Status"
         )
 
-        o1, o2 = st.columns(
-            2
+        left, right = (
+            st.columns(
+                2
+            )
         )
 
-        with o1:
+        # ----------------------------------------------------
+        # CRYPTO ENGINE
+        # ----------------------------------------------------
+
+        with left:
 
             st.markdown(
                 "### ₿ Crypto Engine"
@@ -1268,7 +1407,9 @@ def live_engine():
 
             st.metric(
                 "AI Score",
-                f"{st.session_state.crypto_score:+.1f}",
+                (
+                    f"{st.session_state.crypto_score:+.1f}"
+                ),
             )
 
             st.metric(
@@ -1292,7 +1433,11 @@ def live_engine():
                     "Crypto slot is available."
                 )
 
-        with o2:
+        # ----------------------------------------------------
+        # METALS ENGINE
+        # ----------------------------------------------------
+
+        with right:
 
             st.markdown(
                 "### 🥇 Metals Engine"
@@ -1348,35 +1493,43 @@ def live_engine():
                     "Metals slot is available."
                 )
 
+
     # ========================================================
     # CRYPTO
     # ========================================================
 
     elif selected_page == "Crypto":
 
-        analytics_symbol = (
-            crypto_position.get(
-                "symbol"
-            )
-            if crypto_position
-            else (
-                st.session_state
-                .crypto_market
-                if (
-                    st.session_state
-                    .crypto_market
-                    not in (
-                        "",
-                        "—",
-                    )
-                )
-                else st.session_state
-                .chart_pair
-            )
-        )
+        if crypto_position:
 
-        regime = get_regime_data(
-            analytics_symbol
+            analytics_symbol = (
+                crypto_position.get(
+                    "symbol"
+                )
+            )
+
+        elif (
+            st.session_state.crypto_market
+            not in (
+                "",
+                "—",
+            )
+        ):
+
+            analytics_symbol = (
+                st.session_state.crypto_market
+            )
+
+        else:
+
+            analytics_symbol = (
+                st.session_state.chart_pair
+            )
+
+        regime = (
+            get_regime_data(
+                analytics_symbol
+            )
         )
 
         intelligence = (
@@ -1397,20 +1550,25 @@ def live_engine():
             regime=regime[
                 "regime"
             ],
+
             trend=regime[
                 "trend"
             ],
+
             atr_pct=regime[
                 "atr_pct"
             ],
+
             momentum=regime[
                 "momentum"
             ],
+
             bullish_pct=safe_float(
                 breadth.get(
                     "bullish_pct"
                 )
             ),
+
             bearish_pct=safe_float(
                 breadth.get(
                     "bearish_pct"
@@ -1423,17 +1581,22 @@ def live_engine():
                 st.session_state
                 .crypto_score
             ),
+
             mtf_confidence=(
                 st.session_state
                 .crypto_confidence
             ),
+
             regime=regime[
                 "regime"
             ],
+
             trend=regime[
                 "trend"
             ],
+
             risk_pct=RISK_PCT,
+
             position_state=(
                 crypto_position.get(
                     "side"
@@ -1471,8 +1634,16 @@ def live_engine():
         ):
 
             st.dataframe(
-                corr.round(2),
+                corr.round(
+                    2
+                ),
                 width="stretch",
+            )
+
+        else:
+
+            st.info(
+                "Correlation data is building."
             )
 
 
@@ -1481,6 +1652,10 @@ def live_engine():
     # ========================================================
 
     elif selected_page == "Metals":
+
+        # ----------------------------------------------------
+        # LIVE GOLD / SILVER QUOTES
+        # ----------------------------------------------------
 
         render_metals_dashboard()
 
@@ -1601,8 +1776,10 @@ def live_engine():
 
             for position in positions:
 
-                symbol = position.get(
-                    "symbol"
+                symbol = (
+                    position.get(
+                        "symbol"
+                    )
                 )
 
                 if (
@@ -1635,9 +1812,11 @@ def live_engine():
                     )
                 ):
 
-                    entry = safe_float(
-                        position.get(
-                            "entry_price"
+                    entry = (
+                        safe_float(
+                            position.get(
+                                "entry_price"
+                            )
                         )
                     )
 
@@ -1763,10 +1942,50 @@ def live_engine():
             .metals_scanner_results
         ):
 
+            metal_rows = []
+
+            for item in (
+                st.session_state
+                .metals_scanner_results
+            ):
+
+                metal_rows.append(
+                    {
+                        "Market":
+                            item.get(
+                                "symbol"
+                            ),
+
+                        "Signal":
+                            item.get(
+                                "signal"
+                            ),
+
+                        "Score":
+                            item.get(
+                                "score"
+                            ),
+
+                        "MTF %":
+                            item.get(
+                                "mtf_confidence"
+                            ),
+
+                        "Approved":
+                            item.get(
+                                "approved"
+                            ),
+
+                        "Reason":
+                            item.get(
+                                "reason"
+                            ),
+                    }
+                )
+
             st.dataframe(
                 pd.DataFrame(
-                    st.session_state
-                    .metals_scanner_results
+                    metal_rows
                 ),
                 width="stretch",
                 hide_index=True,
@@ -1808,8 +2027,10 @@ def live_engine():
             )
         )
 
-        a1, a2 = st.columns(
-            2
+        a1, a2 = (
+            st.columns(
+                2
+            )
         )
 
         with a1:
@@ -1832,75 +2053,17 @@ def live_engine():
 
 
     # ========================================================
-    # SETTINGS
+    # SETTINGS / V3 CONTROL CENTER
     # ========================================================
 
     elif selected_page == "Settings":
 
-        st.subheader(
-            "⚙️ Engine Configuration"
-        )
+        render_control_center()
 
-        s1, s2 = st.columns(
-            2
-        )
 
-        with s1:
-
-            st.markdown(
-                "### Crypto"
-            )
-
-            st.metric(
-                "Risk / Trade",
-                f"{RISK_PCT:.1f}%",
-            )
-
-            st.metric(
-                "Scanner Markets",
-                len(
-                    SCAN_MARKETS
-                ),
-            )
-
-            st.metric(
-                "Bot Poll",
-                f"{POLL_SECONDS}s",
-            )
-
-        with s2:
-
-            st.markdown(
-                "### Metals"
-            )
-
-            st.metric(
-                "Risk / Trade",
-                "1.0%",
-            )
-
-            st.metric(
-                "Markets",
-                "XAUUSD / XAGUSD",
-            )
-
-            st.metric(
-                "Scanner Rate",
-                f"{METALS_SCAN_SECONDS}s",
-            )
-
-        st.warning(
-            "Settings are currently read-only "
-            "for safety during paper validation."
-        )
-
-        st.success(
-            "REAL ORDERS DISABLED"
-        )
-
-    # --------------------------------------------------------
+    # ========================================================
     # ERROR
-    # --------------------------------------------------------
+    # ========================================================
 
     if st.session_state.bot_error:
 
@@ -1908,5 +2071,9 @@ def live_engine():
             st.session_state.bot_error
         )
 
+
+# ============================================================
+# START LIVE ENGINE
+# ============================================================
 
 live_engine()
