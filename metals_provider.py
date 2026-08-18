@@ -2,127 +2,53 @@
 metals_provider.py
 
 PRO AI QUANT TERMINAL V3.7
-Quota-Safe Resilient Precious Metals Quote Provider
+FREE REAL-METALS PROVIDER
 
 Primary provider:
-    Metals.Dev
-
-Automatic fallback:
-    Twelve Data
+    Gold-API.com
 
 Supported:
     XAUUSD -> Gold
     XAGUSD -> Silver
 
-Features:
-- Live / near-live metals quotes
-- Provider failover
-- Request caching
-- Provider cooldown protection
-- HTTP 429 protection
-- Monthly quota protection
-- Last-good quote preservation
-- Stale quote detection
-- Duplicate log suppression
-- Safe API-key handling
-- No real order execution
+Architecture:
+    Gold-API live quote
+        ↓
+    validation
+        ↓
+    PostgreSQL metals tick store
+        ↓
+    local 15m / 1h / 4h OHLC builder
 
-Environment variables:
-    METALS_API_KEY
-    TWELVE_DATA_API_KEY
-
-Optional tuning:
-    METALS_CACHE_SECONDS
-    METALS_STALE_SECONDS
-    METALS_DEV_COOLDOWN_SECONDS
-    TWELVE_COOLDOWN_SECONDS
-    METALS_ERROR_LOG_SECONDS
+IMPORTANT:
+- No API key required
+- No paid metals provider required
+- PAPER TRADING ONLY
+- NO REAL ORDERS
 """
 
-import os
-import time
-import threading
-from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
 import requests
+
+from metals_ohlc_store import (
+    store_metal_quote,
+    get_latest_stored_quote,
+)
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-METALS_API_KEY = os.environ.get(
-    "METALS_API_KEY",
-    "",
-).strip()
-
-TWELVE_DATA_API_KEY = os.environ.get(
-    "TWELVE_DATA_API_KEY",
-    "",
-).strip()
-
-
-METALS_BASE_URL = "https://api.metals.dev/v1"
-
-TWELVE_QUOTE_URL = "https://api.twelvedata.com/quote"
-
-
-DEFAULT_CURRENCY = "USD"
-DEFAULT_UNIT = "toz"
+GOLD_API_BASE_URL = (
+    "https://api.gold-api.com"
+)
 
 REQUEST_TIMEOUT = 12
 
-
-# ------------------------------------------------------------
-# QUOTA / CACHE PROTECTION
-# ------------------------------------------------------------
-
-# Fresh quote cache.
-# The UI/scanner can request repeatedly without hitting APIs every time.
-METALS_CACHE_SECONDS = int(
-    os.environ.get(
-        "METALS_CACHE_SECONDS",
-        "60",
-    )
-)
-
-# Last-good quote may temporarily survive provider outages.
-# After this limit, it is no longer returned.
-METALS_STALE_SECONDS = int(
-    os.environ.get(
-        "METALS_STALE_SECONDS",
-        "900",
-    )
-)
-
-# General Metals.Dev failure cooldown.
-METALS_DEV_COOLDOWN_SECONDS = int(
-    os.environ.get(
-        "METALS_DEV_COOLDOWN_SECONDS",
-        "900",
-    )
-)
-
-# Twelve Data failure / rate-limit cooldown.
-TWELVE_COOLDOWN_SECONDS = int(
-    os.environ.get(
-        "TWELVE_COOLDOWN_SECONDS",
-        "300",
-    )
-)
-
-# Same error should not flood Render logs.
-METALS_ERROR_LOG_SECONDS = int(
-    os.environ.get(
-        "METALS_ERROR_LOG_SECONDS",
-        "300",
-    )
-)
-
-# If Metals.Dev reports monthly quota exhausted,
-# stop retrying for several hours.
-METALS_DEV_QUOTA_COOLDOWN_SECONDS = 6 * 60 * 60
+MAX_CACHED_QUOTE_AGE_SECONDS = 300
 
 
 # ============================================================
@@ -131,16 +57,14 @@ METALS_DEV_QUOTA_COOLDOWN_SECONDS = 6 * 60 * 60
 
 SYMBOL_MAP = {
     "XAUUSD": {
-        "metal_key": "gold",
-        "twelve_symbol": "XAU/USD",
+        "api_symbol": "XAU",
         "name": "Gold",
         "base": "XAU",
         "quote": "USD",
     },
 
     "XAGUSD": {
-        "metal_key": "silver",
-        "twelve_symbol": "XAG/USD",
+        "api_symbol": "XAG",
         "name": "Silver",
         "base": "XAG",
         "quote": "USD",
@@ -149,94 +73,8 @@ SYMBOL_MAP = {
 
 
 # ============================================================
-# RUNTIME STATE
+# HELPERS
 # ============================================================
-
-_state_lock = threading.RLock()
-
-
-_quote_cache = {
-    # Example:
-    # "XAUUSD": {
-    #     "quote": {...},
-    #     "timestamp": 123456.0,
-    # }
-}
-
-
-_last_good_quotes = {
-    # Example:
-    # "XAUUSD": {
-    #     "quote": {...},
-    #     "timestamp": 123456.0,
-    # }
-}
-
-
-_provider_cooldown_until = {
-    "metals_dev": 0.0,
-    "twelve_data": 0.0,
-}
-
-
-_last_error_logs = {}
-
-
-# Metals.Dev /latest returns both metals.
-# Cache raw response independently so Gold + Silver
-# do not consume two API calls.
-_metals_dev_raw_cache = {
-    "payload": None,
-    "timestamp": 0.0,
-}
-
-
-# ============================================================
-# TIME HELPERS
-# ============================================================
-
-def _now() -> float:
-    return time.monotonic()
-
-
-def _age(timestamp: float) -> float:
-    if not timestamp:
-        return float("inf")
-
-    return max(
-        0.0,
-        _now() - timestamp,
-    )
-
-
-# ============================================================
-# GENERAL HELPERS
-# ============================================================
-
-def _safe_float(
-    value,
-    default=None,
-):
-
-    try:
-
-        if value is None:
-            return default
-
-        value = float(value)
-
-        if value <= 0:
-            return default
-
-        return value
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-
-        return default
-
 
 def _normalize_symbol(
     symbol: str,
@@ -252,433 +90,52 @@ def _normalize_symbol(
     )
 
 
-def _masked_key(
-    key: str,
-) -> str:
-
-    if not key:
-        return "NOT_SET"
-
-    if len(key) <= 6:
-        return "***"
-
-    return (
-        key[:3]
-        + "***"
-        + key[-3:]
-    )
-
-
-def _clone_quote(
-    quote: Optional[Dict],
-) -> Optional[Dict]:
-
-    if quote is None:
-        return None
-
-    return deepcopy(
-        quote
-    )
-
-
-# ============================================================
-# LOG THROTTLING
-# ============================================================
-
-def _log_once(
-    key: str,
-    message: str,
-    interval: Optional[int] = None,
+def _safe_float(
+    value,
+    default=None,
 ):
 
-    if interval is None:
-        interval = METALS_ERROR_LOG_SECONDS
+    try:
 
-    current = _now()
+        if value is None:
+            return default
 
-    with _state_lock:
-
-        previous = _last_error_logs.get(
-            key,
-            0.0,
+        number = float(
+            value
         )
 
-        if (
-            current - previous
-            < interval
-        ):
-            return
+        if number <= 0:
+            return default
 
-        _last_error_logs[key] = current
+        return number
 
-    print(
-        message,
-        flush=True,
-    )
-
-
-# ============================================================
-# PROVIDER COOLDOWNS
-# ============================================================
-
-def _provider_available(
-    provider: str,
-) -> bool:
-
-    with _state_lock:
-
-        cooldown_until = (
-            _provider_cooldown_until.get(
-                provider,
-                0.0,
-            )
-        )
-
-    return (
-        _now()
-        >= cooldown_until
-    )
-
-
-def _set_provider_cooldown(
-    provider: str,
-    seconds: int,
-):
-
-    seconds = max(
-        1,
-        int(seconds),
-    )
-
-    with _state_lock:
-
-        _provider_cooldown_until[
-            provider
-        ] = max(
-            _provider_cooldown_until.get(
-                provider,
-                0.0,
-            ),
-            _now() + seconds,
-        )
-
-
-def _provider_cooldown_remaining(
-    provider: str,
-) -> int:
-
-    with _state_lock:
-
-        until = (
-            _provider_cooldown_until.get(
-                provider,
-                0.0,
-            )
-        )
-
-    return max(
-        0,
-        int(
-            until - _now()
-        ),
-    )
-
-
-# ============================================================
-# QUOTE CACHE
-# ============================================================
-
-def _get_fresh_cached_quote(
-    symbol: str,
-) -> Optional[Dict]:
-
-    with _state_lock:
-
-        cached = (
-            _quote_cache.get(
-                symbol
-            )
-        )
-
-        if not cached:
-            return None
-
-        timestamp = cached.get(
-            "timestamp",
-            0.0,
-        )
-
-        if (
-            _age(timestamp)
-            > METALS_CACHE_SECONDS
-        ):
-            return None
-
-        quote = _clone_quote(
-            cached.get(
-                "quote"
-            )
-        )
-
-    if quote:
-
-        quote["cached"] = True
-        quote["stale"] = False
-        quote["data_fresh"] = True
-        quote["tradable_data"] = True
-        quote["cache_age_seconds"] = round(
-            _age(timestamp),
-            1,
-        )
-
-    return quote
-
-
-def _store_good_quote(
-    symbol: str,
-    quote: Dict,
-):
-
-    current = _now()
-
-    clean_quote = _clone_quote(
-        quote
-    )
-
-    if clean_quote is None:
-        return
-
-    clean_quote["cached"] = False
-    clean_quote["stale"] = False
-    clean_quote["data_fresh"] = True
-    clean_quote["tradable_data"] = True
-    clean_quote["cache_age_seconds"] = 0.0
-
-    record = {
-        "quote": clean_quote,
-        "timestamp": current,
-    }
-
-    with _state_lock:
-
-        _quote_cache[
-            symbol
-        ] = deepcopy(
-            record
-        )
-
-        _last_good_quotes[
-            symbol
-        ] = deepcopy(
-            record
-        )
-
-
-def _get_last_good_quote(
-    symbol: str,
-) -> Optional[Dict]:
-
-    with _state_lock:
-
-        cached = (
-            _last_good_quotes.get(
-                symbol
-            )
-        )
-
-        if not cached:
-            return None
-
-        timestamp = cached.get(
-            "timestamp",
-            0.0,
-        )
-
-        quote = _clone_quote(
-            cached.get(
-                "quote"
-            )
-        )
-
-    age_seconds = _age(
-        timestamp
-    )
-
-    if (
-        age_seconds
-        > METALS_STALE_SECONDS
+    except (
+        TypeError,
+        ValueError,
     ):
-        return None
 
-    if quote is None:
-        return None
-
-    # IMPORTANT:
-    # Stale quote may be displayed,
-    # but must NOT be treated as safe trading data.
-    quote["cached"] = True
-    quote["stale"] = True
-    quote["data_fresh"] = False
-    quote["tradable_data"] = False
-    quote["provider_fallback"] = True
-    quote["cache_age_seconds"] = round(
-        age_seconds,
-        1,
-    )
-
-    original_source = quote.get(
-        "source",
-        "Unknown",
-    )
-
-    quote["source"] = (
-        f"{original_source} • cached"
-    )
-
-    return quote
+        return default
 
 
-# ============================================================
-# METALS.DEV ERROR DETECTION
-# ============================================================
+def _utc_now():
 
-def _looks_like_metals_quota_error(
-    status_code: int,
-    body,
-) -> bool:
-
-    text = str(
-        body
-    ).lower()
-
-    quota_markers = (
-        "quota",
-        "exhausted",
-        "monthly",
-        "error_code': 1203",
-        '"error_code": 1203',
-        "error_code\":1203",
-    )
-
-    if any(
-        marker in text
-        for marker in quota_markers
-    ):
-        return True
-
-    return False
-
-
-# ============================================================
-# TWELVE DATA ERROR DETECTION
-# ============================================================
-
-def _looks_like_twelve_rate_limit(
-    status_code: int,
-    body,
-) -> bool:
-
-    if status_code == 429:
-        return True
-
-    text = str(
-        body
-    ).lower()
-
-    markers = (
-        "api credits",
-        "credits",
-        "rate limit",
-        "too many requests",
-        "run out",
-    )
-
-    return any(
-        marker in text
-        for marker in markers
+    return datetime.now(
+        timezone.utc
     )
 
 
 # ============================================================
-# METALS.DEV RAW REQUEST
+# RAW GOLD-API REQUEST
 # ============================================================
 
-def get_latest_metals_raw(
-    currency: str = DEFAULT_CURRENCY,
-    unit: str = DEFAULT_UNIT,
+def _get_gold_api_raw(
+    api_symbol: str,
 ) -> Dict:
 
-    if not METALS_API_KEY:
-
-        raise RuntimeError(
-            "METALS_API_KEY is not configured."
-        )
-
-    # --------------------------------------------------------
-    # Raw Metals.Dev cache
-    # --------------------------------------------------------
-
-    with _state_lock:
-
-        cached_payload = (
-            _metals_dev_raw_cache.get(
-                "payload"
-            )
-        )
-
-        cached_timestamp = (
-            _metals_dev_raw_cache.get(
-                "timestamp",
-                0.0,
-            )
-        )
-
-    if (
-        cached_payload is not None
-        and _age(
-            cached_timestamp
-        )
-        <= METALS_CACHE_SECONDS
-    ):
-
-        return deepcopy(
-            cached_payload
-        )
-
-    # --------------------------------------------------------
-    # Provider cooldown
-    # --------------------------------------------------------
-
-    if not _provider_available(
-        "metals_dev"
-    ):
-
-        remaining = (
-            _provider_cooldown_remaining(
-                "metals_dev"
-            )
-        )
-
-        raise RuntimeError(
-            "Metals.Dev temporarily paused "
-            f"for quota/rate protection "
-            f"({remaining}s remaining)."
-        )
-
     url = (
-        f"{METALS_BASE_URL}/latest"
+        f"{GOLD_API_BASE_URL}"
+        f"/price/{api_symbol}"
     )
-
-    params = {
-        "api_key":
-            METALS_API_KEY,
-
-        "currency":
-            str(currency).upper(),
-
-        "unit":
-            unit,
-    }
 
     headers = {
         "Accept":
@@ -688,656 +145,226 @@ def get_latest_metals_raw(
             "pro-ai-quant-terminal-v3.7",
     }
 
-    try:
-
-        response = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=REQUEST_TIMEOUT,
-        )
-
-    except requests.RequestException as error:
-
-        _set_provider_cooldown(
-            "metals_dev",
-            METALS_DEV_COOLDOWN_SECONDS,
-        )
-
-        raise RuntimeError(
-            "Metals.Dev network error: "
-            f"{error}"
-        ) from error
-
-    # --------------------------------------------------------
-    # Provider error
-    # --------------------------------------------------------
+    response = requests.get(
+        url,
+        headers=headers,
+        timeout=REQUEST_TIMEOUT,
+    )
 
     if not response.ok:
 
         try:
-            error_payload = (
-                response.json()
-            )
+            body = response.json()
 
         except Exception:
-            error_payload = (
+            body = (
                 response.text[:500]
             )
 
-        if _looks_like_metals_quota_error(
-            response.status_code,
-            error_payload,
-        ):
-
-            _set_provider_cooldown(
-                "metals_dev",
-                METALS_DEV_QUOTA_COOLDOWN_SECONDS,
-            )
-
-            raise RuntimeError(
-                "Metals.Dev monthly quota "
-                "appears exhausted. "
-                "Provider paused automatically."
-            )
-
-        if response.status_code == 429:
-
-            _set_provider_cooldown(
-                "metals_dev",
-                METALS_DEV_COOLDOWN_SECONDS,
-            )
-
-            raise RuntimeError(
-                "Metals.Dev rate limit reached. "
-                "Provider paused automatically."
-            )
-
-        _set_provider_cooldown(
-            "metals_dev",
-            METALS_DEV_COOLDOWN_SECONDS,
-        )
-
         raise RuntimeError(
-            "Metals.Dev HTTP "
+            "Gold-API HTTP "
             f"{response.status_code}: "
-            f"{error_payload}"
+            f"{body}"
         )
 
-    # --------------------------------------------------------
-    # Parse response
-    # --------------------------------------------------------
-
-    try:
-
-        data = (
-            response.json()
-        )
-
-    except Exception as error:
-
-        _set_provider_cooldown(
-            "metals_dev",
-            METALS_DEV_COOLDOWN_SECONDS,
-        )
-
-        raise RuntimeError(
-            "Invalid Metals.Dev JSON response."
-        ) from error
+    data = response.json()
 
     if not isinstance(
         data,
         dict,
     ):
 
-        _set_provider_cooldown(
-            "metals_dev",
-            METALS_DEV_COOLDOWN_SECONDS,
-        )
-
         raise RuntimeError(
-            "Invalid Metals.Dev response."
+            "Invalid Gold-API response."
         )
-
-    status = str(
-        data.get(
-            "status",
-            ""
-        )
-    ).lower()
-
-    if (
-        status
-        and status != "success"
-    ):
-
-        if _looks_like_metals_quota_error(
-            200,
-            data,
-        ):
-
-            _set_provider_cooldown(
-                "metals_dev",
-                METALS_DEV_QUOTA_COOLDOWN_SECONDS,
-            )
-
-        else:
-
-            _set_provider_cooldown(
-                "metals_dev",
-                METALS_DEV_COOLDOWN_SECONDS,
-            )
-
-        raise RuntimeError(
-            "Metals.Dev API error: "
-            f"{data}"
-        )
-
-    # --------------------------------------------------------
-    # Save one raw response for Gold + Silver
-    # --------------------------------------------------------
-
-    with _state_lock:
-
-        _metals_dev_raw_cache[
-            "payload"
-        ] = deepcopy(
-            data
-        )
-
-        _metals_dev_raw_cache[
-            "timestamp"
-        ] = _now()
 
     return data
 
 
 # ============================================================
-# METALS.DEV PRICE EXTRACTION
+# EXTRACT PRICE
 # ============================================================
 
-def _extract_metal_price(
+def _extract_price(
     payload: Dict,
-    metal_key: str,
 ):
 
-    metals = payload.get(
-        "metals"
-    )
-
-    if isinstance(
-        metals,
-        dict,
+    for key in (
+        "price",
+        "close",
+        "value",
+        "last",
     ):
 
-        value = _safe_float(
-            metals.get(
-                metal_key
+        price = _safe_float(
+            payload.get(
+                key
             ),
             None,
         )
 
-        if value is not None:
-            return value
+        if price is not None:
 
-    candidate = payload.get(
-        metal_key
-    )
-
-    value = _safe_float(
-        candidate,
-        None,
-    )
-
-    if value is not None:
-        return value
+            return price
 
     return None
 
 
 # ============================================================
-# TWELVE DATA FALLBACK
+# OPTIONAL FIELD
 # ============================================================
 
-def _get_twelve_data_quote(
+def _extract_optional(
+    payload: Dict,
+    *keys,
+):
+
+    for key in keys:
+
+        value = _safe_float(
+            payload.get(
+                key
+            ),
+            None,
+        )
+
+        if value is not None:
+
+            return value
+
+    return None
+
+
+# ============================================================
+# CACHE FALLBACK
+# ============================================================
+
+def _cached_quote(
     normalized_symbol: str,
 ) -> Optional[Dict]:
 
-    if not TWELVE_DATA_API_KEY:
-        return None
-
-    if not _provider_available(
-        "twelve_data"
-    ):
-
-        return None
-
-    info = SYMBOL_MAP.get(
-        normalized_symbol
-    )
-
-    if not info:
-        return None
-
-    params = {
-        "symbol":
-            info[
-                "twelve_symbol"
-            ],
-
-        "apikey":
-            TWELVE_DATA_API_KEY,
-    }
-
     try:
 
-        response = requests.get(
-            TWELVE_QUOTE_URL,
-            params=params,
-            timeout=REQUEST_TIMEOUT,
+        cached = (
+            get_latest_stored_quote(
+                normalized_symbol
+            )
         )
 
-    except requests.RequestException as error:
-
-        _set_provider_cooldown(
-            "twelve_data",
-            TWELVE_COOLDOWN_SECONDS,
-        )
-
-        _log_once(
-            "twelve_network",
-            "[TWELVE DATA ERROR] "
-            f"{normalized_symbol}: "
-            f"network error: {error}",
-        )
-
-        return None
-
-    # --------------------------------------------------------
-    # HTTP error
-    # --------------------------------------------------------
-
-    if not response.ok:
-
-        try:
-            body = (
-                response.json()
-            )
-
-        except Exception:
-            body = (
-                response.text[:300]
-            )
-
-        if _looks_like_twelve_rate_limit(
-            response.status_code,
-            body,
-        ):
-
-            _set_provider_cooldown(
-                "twelve_data",
-                TWELVE_COOLDOWN_SECONDS,
-            )
-
-            _log_once(
-                "twelve_rate_limit",
-                "[TWELVE DATA RATE LIMIT] "
-                "API credit/rate limit reached. "
-                "Fallback provider paused automatically.",
-            )
+        if not cached:
 
             return None
 
-        _set_provider_cooldown(
-            "twelve_data",
-            TWELVE_COOLDOWN_SECONDS,
-        )
-
-        _log_once(
-            f"twelve_http_{response.status_code}",
-            "[TWELVE DATA ERROR] "
-            f"{normalized_symbol}: "
-            f"HTTP {response.status_code} "
-            f"{body}",
-        )
-
-        return None
-
-    # --------------------------------------------------------
-    # Parse data
-    # --------------------------------------------------------
-
-    try:
-
-        data = (
-            response.json()
-        )
-
-    except Exception:
-
-        _log_once(
-            "twelve_invalid_json",
-            "[TWELVE DATA ERROR] "
-            f"{normalized_symbol}: "
-            "invalid JSON response",
-        )
-
-        return None
-
-    if not isinstance(
-        data,
-        dict,
-    ):
-        return None
-
-    if (
-        str(
-            data.get(
-                "status",
-                ""
+        observed_at = (
+            datetime.fromisoformat(
+                cached[
+                    "observed_at"
+                ]
             )
-        ).lower()
-        == "error"
-    ):
+        )
 
-        if _looks_like_twelve_rate_limit(
-            response.status_code,
-            data,
+        age_seconds = (
+            _utc_now()
+            - observed_at
+        ).total_seconds()
+
+        if (
+            age_seconds
+            > MAX_CACHED_QUOTE_AGE_SECONDS
         ):
 
-            _set_provider_cooldown(
-                "twelve_data",
-                TWELVE_COOLDOWN_SECONDS,
-            )
+            return None
 
-        _log_once(
-            "twelve_api_error",
-            "[TWELVE DATA ERROR] "
-            f"{normalized_symbol}: "
-            f"{data.get('message')}",
-        )
-
-        return None
-
-    last = (
-        _safe_float(
-            data.get(
-                "close"
-            ),
-            None,
-        )
-        or
-        _safe_float(
-            data.get(
-                "price"
-            ),
-            None,
-        )
-    )
-
-    if last is None:
-        return None
-
-    bid = _safe_float(
-        data.get(
-            "bid"
-        ),
-        None,
-    )
-
-    ask = _safe_float(
-        data.get(
-            "ask"
-        ),
-        None,
-    )
-
-    spread_pct = None
-
-    if (
-        bid is not None
-        and ask is not None
-        and bid > 0
-        and ask >= bid
-    ):
-
-        midpoint = (
-            bid + ask
-        ) / 2
-
-        if midpoint > 0:
-
-            spread_pct = (
-                (ask - bid)
-                / midpoint
-            ) * 100
-
-    return {
-        "symbol":
-            normalized_symbol,
-
-        "name":
-            info[
-                "name"
-            ],
-
-        "asset_class":
-            "METAL",
-
-        "base":
-            info[
-                "base"
-            ],
-
-        "quote":
-            info[
-                "quote"
-            ],
-
-        "last":
-            last,
-
-        "bid":
-            bid,
-
-        "ask":
-            ask,
-
-        "high":
-            _safe_float(
-                data.get(
-                    "high"
-                ),
-                None,
-            ),
-
-        "low":
-            _safe_float(
-                data.get(
-                    "low"
-                ),
-                None,
-            ),
-
-        "open":
-            _safe_float(
-                data.get(
-                    "open"
-                ),
-                None,
-            ),
-
-        "previous_close":
-            _safe_float(
-                data.get(
-                    "previous_close"
-                ),
-                None,
-            ),
-
-        "change_pct":
-            _safe_float(
-                data.get(
-                    "percent_change"
-                ),
-                None,
-            ),
-
-        "spread_pct":
-            spread_pct,
-
-        "currency":
-            "USD",
-
-        "unit":
-            "troy_ounce",
-
-        "source":
-            "Twelve Data",
-
-        "provider_fallback":
-            True,
-
-        "cached":
-            False,
-
-        "stale":
-            False,
-
-        "data_fresh":
-            True,
-
-        "tradable_data":
-            True,
-
-        "raw":
-            data,
-    }
-
-
-# ============================================================
-# PRIMARY METALS.DEV QUOTE
-# ============================================================
-
-def _get_metals_dev_quote(
-    normalized_symbol: str,
-) -> Optional[Dict]:
-
-    info = SYMBOL_MAP.get(
-        normalized_symbol
-    )
-
-    if not info:
-        return None
-
-    payload = (
-        get_latest_metals_raw(
-            currency="USD",
-            unit="toz",
-        )
-    )
-
-    metal_key = (
-        info[
-            "metal_key"
+        info = SYMBOL_MAP[
+            normalized_symbol
         ]
-    )
 
-    last = (
-        _extract_metal_price(
-            payload,
-            metal_key,
+        return {
+            "symbol":
+                normalized_symbol,
+
+            "name":
+                info[
+                    "name"
+                ],
+
+            "asset_class":
+                "METAL",
+
+            "base":
+                info[
+                    "base"
+                ],
+
+            "quote":
+                info[
+                    "quote"
+                ],
+
+            "last":
+                float(
+                    cached[
+                        "price"
+                    ]
+                ),
+
+            "bid":
+                None,
+
+            "ask":
+                None,
+
+            "high":
+                None,
+
+            "low":
+                None,
+
+            "change_pct":
+                None,
+
+            "spread_pct":
+                None,
+
+            "currency":
+                "USD",
+
+            "unit":
+                "troy_ounce",
+
+            "source":
+                (
+                    "LOCAL_CACHE"
+                ),
+
+            "provider_fallback":
+                True,
+
+            "cached":
+                True,
+
+            "cache_age_seconds":
+                round(
+                    age_seconds,
+                    2,
+                ),
+
+            "observed_at":
+                cached[
+                    "observed_at"
+                ],
+        }
+
+    except Exception as error:
+
+        print(
+            "[METALS CACHE ERROR] "
+            f"{normalized_symbol}: "
+            f"{error}",
+            flush=True,
         )
-    )
 
-    if (
-        last is None
-        or last <= 0
-    ):
-
-        raise RuntimeError(
-            "Metals.Dev returned no "
-            f"{metal_key} price."
-        )
-
-    return {
-        "symbol":
-            normalized_symbol,
-
-        "name":
-            info[
-                "name"
-            ],
-
-        "asset_class":
-            "METAL",
-
-        "base":
-            info[
-                "base"
-            ],
-
-        "quote":
-            info[
-                "quote"
-            ],
-
-        "last":
-            float(
-                last
-            ),
-
-        "bid":
-            None,
-
-        "ask":
-            None,
-
-        "high":
-            None,
-
-        "low":
-            None,
-
-        "open":
-            None,
-
-        "previous_close":
-            None,
-
-        "change_pct":
-            None,
-
-        "spread_pct":
-            None,
-
-        "currency":
-            "USD",
-
-        "unit":
-            "troy_ounce",
-
-        "source":
-            "Metals.Dev",
-
-        "provider_fallback":
-            False,
-
-        "cached":
-            False,
-
-        "stale":
-            False,
-
-        "data_fresh":
-            True,
-
-        "tradable_data":
-            True,
-
-        "raw":
-            payload,
-    }
+        return None
 
 
 # ============================================================
@@ -1354,131 +381,233 @@ def get_metal_quote(
         )
     )
 
-    if normalized not in SYMBOL_MAP:
+    info = SYMBOL_MAP.get(
+        normalized
+    )
+
+    if not info:
 
         raise ValueError(
             f"Unsupported metal symbol: "
             f"{symbol}"
         )
 
-    # --------------------------------------------------------
-    # 1. FRESH LOCAL CACHE
-    # --------------------------------------------------------
+    try:
 
-    cached = (
-        _get_fresh_cached_quote(
-            normalized
+        payload = (
+            _get_gold_api_raw(
+                info[
+                    "api_symbol"
+                ]
+            )
         )
-    )
 
-    if cached is not None:
-        return cached
+        last = (
+            _extract_price(
+                payload
+            )
+        )
 
-    # --------------------------------------------------------
-    # 2. PRIMARY PROVIDER
-    # --------------------------------------------------------
+        if last is None:
 
-    if _provider_available(
-        "metals_dev"
-    ):
+            raise RuntimeError(
+                "Gold-API returned "
+                "no usable price."
+            )
+
+        bid = (
+            _extract_optional(
+                payload,
+                "bid",
+                "bid_price",
+            )
+        )
+
+        ask = (
+            _extract_optional(
+                payload,
+                "ask",
+                "ask_price",
+            )
+        )
+
+        high = (
+            _extract_optional(
+                payload,
+                "high",
+                "day_high",
+            )
+        )
+
+        low = (
+            _extract_optional(
+                payload,
+                "low",
+                "day_low",
+            )
+        )
+
+        change_pct = (
+            _extract_optional(
+                payload,
+                "change_percent",
+                "change_pct",
+                "percent_change",
+            )
+        )
+
+        spread_pct = None
+
+        if (
+            bid is not None
+            and ask is not None
+            and ask >= bid
+        ):
+
+            midpoint = (
+                bid + ask
+            ) / 2
+
+            if midpoint > 0:
+
+                spread_pct = (
+                    (
+                        ask - bid
+                    )
+                    / midpoint
+                    * 100
+                )
+
+        observed_at = (
+            _utc_now()
+        )
+
+        # ----------------------------------------------------
+        # PERSIST LIVE TICK
+        # ----------------------------------------------------
 
         try:
 
-            quote = (
-                _get_metals_dev_quote(
-                    normalized
-                )
+            store_metal_quote(
+                symbol=normalized,
+                price=last,
+                provider="Gold-API",
+                observed_at=observed_at,
             )
 
-            if (
-                quote
-                and quote.get(
-                    "last"
-                )
-            ):
+        except Exception as store_error:
 
-                _store_good_quote(
-                    normalized,
-                    quote,
-                )
-
-                return _clone_quote(
-                    quote
-                )
-
-        except Exception as error:
-
-            _log_once(
-                "metals_dev_error",
-                "[METALS.DEV ERROR] "
+            print(
+                "[METALS STORE ERROR] "
                 f"{normalized}: "
-                f"{error}",
+                f"{store_error}",
+                flush=True,
             )
 
-    # --------------------------------------------------------
-    # 3. TWELVE DATA FALLBACK
-    # --------------------------------------------------------
+        return {
+            "symbol":
+                normalized,
 
-    fallback = (
-        _get_twelve_data_quote(
-            normalized
-        )
-    )
+            "name":
+                info[
+                    "name"
+                ],
 
-    if fallback:
+            "asset_class":
+                "METAL",
 
-        _store_good_quote(
-            normalized,
-            fallback,
-        )
+            "base":
+                info[
+                    "base"
+                ],
 
-        _log_once(
-            f"fallback_{normalized}",
-            "[METALS PROVIDER FALLBACK] "
+            "quote":
+                info[
+                    "quote"
+                ],
+
+            "last":
+                float(
+                    last
+                ),
+
+            "bid":
+                bid,
+
+            "ask":
+                ask,
+
+            "high":
+                high,
+
+            "low":
+                low,
+
+            "change_pct":
+                change_pct,
+
+            "spread_pct":
+                spread_pct,
+
+            "currency":
+                "USD",
+
+            "unit":
+                "troy_ounce",
+
+            "source":
+                "Gold-API",
+
+            "provider_fallback":
+                False,
+
+            "cached":
+                False,
+
+            "observed_at":
+                observed_at.isoformat(),
+
+            "raw":
+                payload,
+        }
+
+    except Exception as error:
+
+        print(
+            "[GOLD-API ERROR] "
             f"{normalized}: "
-            "using Twelve Data",
-            interval=900,
+            f"{error}",
+            flush=True,
         )
 
-        return _clone_quote(
-            fallback
+        # ----------------------------------------------------
+        # SAFE LAST-KNOWN-GOOD FALLBACK
+        # ----------------------------------------------------
+
+        cached = (
+            _cached_quote(
+                normalized
+            )
         )
 
-    # --------------------------------------------------------
-    # 4. LAST-GOOD QUOTE
-    # --------------------------------------------------------
+        if cached:
 
-    stale_quote = (
-        _get_last_good_quote(
-            normalized
-        )
-    )
+            print(
+                "[METALS CACHE FALLBACK] "
+                f"{normalized}",
+                flush=True,
+            )
 
-    if stale_quote:
+            return cached
 
-        _log_once(
-            f"stale_{normalized}",
-            "[METALS CACHE FALLBACK] "
+        print(
+            "[METALS PROVIDER FAILED] "
             f"{normalized}: "
-            "using last-good cached quote "
-            "(NOT tradable data)",
+            "no valid live or cached quote",
+            flush=True,
         )
 
-        return stale_quote
-
-    # --------------------------------------------------------
-    # 5. COMPLETE FAILURE
-    # --------------------------------------------------------
-
-    _log_once(
-        f"failed_{normalized}",
-        "[METALS PROVIDER FAILED] "
-        f"{normalized}: "
-        "all providers unavailable "
-        "and no valid cached quote exists",
-    )
-
-    return None
+        return None
 
 
 # ============================================================
@@ -1529,7 +658,7 @@ def get_all_metal_quotes():
 
 
 # ============================================================
-# PROVIDER HEALTH
+# HEALTH CHECK
 # ============================================================
 
 def metals_provider_health():
@@ -1538,164 +667,72 @@ def metals_provider_health():
         get_gold_quote()
     )
 
-    metals_dev_remaining = (
-        _provider_cooldown_remaining(
-            "metals_dev"
+    silver = (
+        get_silver_quote()
+    )
+
+    gold_ok = (
+        gold is not None
+        and gold.get(
+            "last"
         )
     )
 
-    twelve_remaining = (
-        _provider_cooldown_remaining(
-            "twelve_data"
-        )
-    )
-
-    if gold is None:
-
-        return {
-            "ok":
-                False,
-
-            "provider":
-                "Metals.Dev + Twelve Data",
-
-            "reason":
-                "Both providers unavailable",
-
-            "metals_dev_key":
-                _masked_key(
-                    METALS_API_KEY
-                ),
-
-            "twelve_data_key":
-                _masked_key(
-                    TWELVE_DATA_API_KEY
-                ),
-
-            "metals_dev_cooldown_seconds":
-                metals_dev_remaining,
-
-            "twelve_data_cooldown_seconds":
-                twelve_remaining,
-        }
-
-    stale = bool(
-        gold.get(
-            "stale",
-            False,
+    silver_ok = (
+        silver is not None
+        and silver.get(
+            "last"
         )
     )
 
     return {
         "ok":
-            not stale,
-
-        "provider":
-            gold.get(
-                "source"
+            bool(
+                gold_ok
+                or silver_ok
             ),
 
-        "fallback":
-            gold.get(
-                "provider_fallback",
-                False,
+        "provider":
+            "Gold-API",
+
+        "gold_status":
+            (
+                "ONLINE"
+                if gold_ok
+                else "OFFLINE"
+            ),
+
+        "silver_status":
+            (
+                "ONLINE"
+                if silver_ok
+                else "OFFLINE"
             ),
 
         "gold_price":
-            gold.get(
-                "last"
+            (
+                gold.get(
+                    "last"
+                )
+                if gold
+                else None
             ),
 
-        "stale":
-            stale,
-
-        "data_fresh":
-            gold.get(
-                "data_fresh",
-                False,
+        "silver_price":
+            (
+                silver.get(
+                    "last"
+                )
+                if silver
+                else None
             ),
 
-        "tradable_data":
-            gold.get(
-                "tradable_data",
-                False,
-            ),
+        "database_tick_store":
+            True,
 
-        "cache_age_seconds":
-            gold.get(
-                "cache_age_seconds",
-                0.0,
-            ),
+        "api_key_required":
+            False,
 
-        "metals_dev_cooldown_seconds":
-            metals_dev_remaining,
-
-        "twelve_data_cooldown_seconds":
-            twelve_remaining,
+        "real_orders":
+            False,
     }
-
-
-# ============================================================
-# MANUAL CACHE STATUS
-# ============================================================
-
-def metals_cache_status():
-
-    result = {}
-
-    for symbol in SYMBOL_MAP:
-
-        with _state_lock:
-
-            record = (
-                _last_good_quotes.get(
-                    symbol
-                )
-            )
-
-        if not record:
-
-            result[
-                symbol
-            ] = {
-                "available":
-                    False,
-            }
-
-            continue
-
-        age_seconds = (
-            _age(
-                record.get(
-                    "timestamp",
-                    0.0,
-                )
-            )
-        )
-
-        result[
-            symbol
-        ] = {
-            "available":
-                True,
-
-            "age_seconds":
-                round(
-                    age_seconds,
-                    1,
-                ),
-
-            "fresh":
-                (
-                    age_seconds
-                    <= METALS_CACHE_SECONDS
-                ),
-
-            "usable_as_stale":
-                (
-                    age_seconds
-                    <= METALS_STALE_SECONDS
-                ),
-        }
-
-    return result
