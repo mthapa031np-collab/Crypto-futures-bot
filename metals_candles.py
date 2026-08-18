@@ -1,8 +1,8 @@
 """
 metals_candles.py
 
-PRO AI QUANT TERMINAL V3.7
-LOCAL METALS CANDLE ENGINE
+PRO AI QUANT TERMINAL V3.8
+PRODUCTION LOCAL METALS CANDLE + WARM-UP ENGINE
 
 Primary candle source:
     PostgreSQL metals_ticks
@@ -19,23 +19,20 @@ Timeframes:
     1h
     4h
 
-Purpose
--------
-- Remove Twelve Data candle dependency
-- Remove paid commodity API dependency
-- Build persistent OHLC candles locally
-- Feed existing Metals scanner / MTF engine
-- Safe readiness checks
-- Never invent candle data
-
-IMPORTANT
----------
-PAPER TRADING ONLY
-NO REAL ORDERS
+Goals
+-----
+- Zero Twelve Data dependency
+- Zero Metals.Dev candle dependency
+- Build OHLC locally
+- Reject invalid / stale candles
+- Clear WARMING_UP state
+- Scanner backward compatibility
+- Safe paper-trading behavior
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
 import pandas as pd
@@ -44,6 +41,7 @@ from metals_ohlc_store import (
     build_candles,
     get_metals_mtf_candles,
     metals_ohlc_readiness,
+    get_latest_stored_quote,
 )
 
 
@@ -58,25 +56,22 @@ SUPPORTED_SYMBOLS = {
 
 
 # ============================================================
-# TIMEFRAME NORMALIZATION
+# TIMEFRAMES
 # ============================================================
 
 TIMEFRAME_ALIASES = {
-    # 15 minute
     "15m": "15m",
     "15min": "15m",
     "15": "15m",
     "15minute": "15m",
     "15minutes": "15m",
 
-    # 1 hour
     "1h": "1h",
     "60m": "1h",
     "60min": "1h",
     "60": "1h",
     "1hour": "1h",
 
-    # 4 hour
     "4h": "4h",
     "240m": "4h",
     "240min": "4h",
@@ -85,9 +80,26 @@ TIMEFRAME_ALIASES = {
 }
 
 
+MINIMUM_CANDLES = {
+    "15m": 60,
+    "1h": 60,
+    "4h": 60,
+}
+
+
+MAX_QUOTE_AGE_SECONDS = 300
+
+
 # ============================================================
 # HELPERS
 # ============================================================
+
+def _utc_now():
+
+    return datetime.now(
+        timezone.utc
+    )
+
 
 def _normalize_symbol(
     symbol: str,
@@ -152,6 +164,10 @@ def _empty_candles():
     )
 
 
+# ============================================================
+# STANDARDIZE / VALIDATE DATAFRAME
+# ============================================================
+
 def _standardize_dataframe(
     df: Optional[pd.DataFrame],
 ) -> pd.DataFrame:
@@ -187,7 +203,7 @@ def _standardize_dataframe(
 
         print(
             "[METALS CANDLE FORMAT ERROR] "
-            f"missing columns: "
+            f"Missing columns: "
             f"{sorted(missing)}",
             flush=True,
         )
@@ -257,7 +273,110 @@ def _standardize_dataframe(
 
         return _empty_candles()
 
+    # Reject impossible OHLC rows
+    valid = (
+        (result["open"] > 0)
+        & (result["high"] > 0)
+        & (result["low"] > 0)
+        & (result["close"] > 0)
+        & (result["high"] >= result["low"])
+        & (result["high"] >= result["open"])
+        & (result["high"] >= result["close"])
+        & (result["low"] <= result["open"])
+        & (result["low"] <= result["close"])
+    )
+
+    result = (
+        result[
+            valid
+        ]
+        .reset_index(
+            drop=True
+        )
+    )
+
     return result
+
+
+# ============================================================
+# LIVE QUOTE FRESHNESS
+# ============================================================
+
+def metals_quote_freshness(
+    symbol: str,
+) -> Dict:
+
+    normalized = (
+        _normalize_symbol(
+            symbol
+        )
+    )
+
+    try:
+
+        quote = (
+            get_latest_stored_quote(
+                normalized
+            )
+        )
+
+        if not quote:
+
+            return {
+                "symbol": normalized,
+                "fresh": False,
+                "age_seconds": None,
+                "reason": "No stored quote",
+            }
+
+        observed_at = (
+            datetime.fromisoformat(
+                quote[
+                    "observed_at"
+                ]
+            )
+        )
+
+        age_seconds = (
+            _utc_now()
+            - observed_at
+        ).total_seconds()
+
+        fresh = (
+            age_seconds
+            <= MAX_QUOTE_AGE_SECONDS
+        )
+
+        return {
+            "symbol": normalized,
+            "fresh": fresh,
+            "age_seconds": round(
+                age_seconds,
+                2,
+            ),
+            "provider": quote.get(
+                "provider"
+            ),
+            "price": quote.get(
+                "price"
+            ),
+            "reason": (
+                "OK"
+                if fresh
+                else "Stored quote is stale"
+            ),
+        }
+
+    except Exception as error:
+
+        return {
+            "symbol": normalized,
+            "fresh": False,
+            "age_seconds": None,
+            "reason": str(
+                error
+            ),
+        }
 
 
 # ============================================================
@@ -269,17 +388,6 @@ def get_metals_candles(
     timeframe="15m",
     limit: int = 200,
 ) -> pd.DataFrame:
-    """
-    Return locally-built OHLC candles.
-
-    This function intentionally performs NO external
-    candle API requests.
-
-    Source:
-        metals_ticks PostgreSQL table
-            ↓
-        local OHLC aggregation
-    """
 
     normalized_symbol = (
         _normalize_symbol(
@@ -316,17 +424,21 @@ def get_metals_candles(
 
     try:
 
-        candles = build_candles(
-            symbol=normalized_symbol,
-            timeframe=normalized_timeframe,
-            limit=limit,
+        candles = (
+            build_candles(
+                symbol=normalized_symbol,
+                timeframe=normalized_timeframe,
+                limit=limit,
+            )
         )
 
-        return (
+        candles = (
             _standardize_dataframe(
                 candles
             )
         )
+
+        return candles
 
     except Exception as error:
 
@@ -350,9 +462,6 @@ def get_metal_candles(
     timeframe="15m",
     limit: int = 200,
 ) -> pd.DataFrame:
-    """
-    Compatibility alias for older scanner code.
-    """
 
     return get_metals_candles(
         symbol=symbol,
@@ -362,7 +471,7 @@ def get_metal_candles(
 
 
 # ============================================================
-# 15M
+# TIMEFRAME HELPERS
 # ============================================================
 
 def get_15m_candles(
@@ -377,10 +486,6 @@ def get_15m_candles(
     )
 
 
-# ============================================================
-# 1H
-# ============================================================
-
 def get_1h_candles(
     symbol: str,
     limit: int = 200,
@@ -392,10 +497,6 @@ def get_1h_candles(
         limit=limit,
     )
 
-
-# ============================================================
-# 4H
-# ============================================================
 
 def get_4h_candles(
     symbol: str,
@@ -477,10 +578,6 @@ def get_mtf_metals_candles(
         }
 
 
-# ============================================================
-# BACKWARD-COMPATIBLE MTF ALIAS
-# ============================================================
-
 def get_metals_multi_timeframe_candles(
     symbol: str,
     limit: int = 200,
@@ -506,13 +603,94 @@ def get_metals_candle_readiness(
         )
     )
 
+    freshness = (
+        metals_quote_freshness(
+            normalized_symbol
+        )
+    )
+
     try:
 
-        return (
-            metals_ohlc_readiness(
-                normalized_symbol
+        timeframes = {}
+
+        all_ready = True
+
+        for timeframe, minimum in (
+            MINIMUM_CANDLES.items()
+        ):
+
+            candles = (
+                get_metals_candles(
+                    symbol=normalized_symbol,
+                    timeframe=timeframe,
+                    limit=minimum,
+                )
             )
+
+            count = len(
+                candles
+            )
+
+            ready = (
+                count
+                >= minimum
+            )
+
+            timeframes[
+                timeframe
+            ] = {
+                "candles":
+                    count,
+
+                "minimum":
+                    minimum,
+
+                "ready":
+                    ready,
+
+                "remaining":
+                    max(
+                        0,
+                        minimum - count,
+                    ),
+            }
+
+            if not ready:
+
+                all_ready = False
+
+        if not freshness.get(
+            "fresh",
+            False,
+        ):
+
+            all_ready = False
+
+        state = (
+            "READY"
+            if all_ready
+            else "WARMING_UP"
         )
+
+        return {
+            "symbol":
+                normalized_symbol,
+
+            "ready":
+                all_ready,
+
+            "state":
+                state,
+
+            "timeframes":
+                timeframes,
+
+            "quote_freshness":
+                freshness,
+
+            "source":
+                "LOCAL_POSTGRES_OHLC",
+        }
 
     except Exception as error:
 
@@ -523,8 +701,14 @@ def get_metals_candle_readiness(
             "ready":
                 False,
 
+            "state":
+                "ERROR",
+
             "timeframes":
                 {},
+
+            "quote_freshness":
+                freshness,
 
             "reason":
                 str(
@@ -540,10 +724,6 @@ def get_metals_candle_readiness(
 def metals_candles_ready(
     symbol: str,
 ) -> bool:
-    """
-    True only after enough locally-built history
-    exists for the MTF scanner.
-    """
 
     readiness = (
         get_metals_candle_readiness(
@@ -560,7 +740,65 @@ def metals_candles_ready(
 
 
 # ============================================================
-# CANDLE STATUS SUMMARY
+# WARM-UP STATUS
+# ============================================================
+
+def metals_warmup_status(
+    symbol: str,
+) -> Dict:
+
+    readiness = (
+        get_metals_candle_readiness(
+            symbol
+        )
+    )
+
+    return {
+        "symbol":
+            readiness.get(
+                "symbol"
+            ),
+
+        "state":
+            readiness.get(
+                "state",
+                "WARMING_UP",
+            ),
+
+        "ready":
+            readiness.get(
+                "ready",
+                False,
+            ),
+
+        "timeframes":
+            readiness.get(
+                "timeframes",
+                {},
+            ),
+
+        "quote_freshness":
+            readiness.get(
+                "quote_freshness",
+                {},
+            ),
+
+        "message":
+            (
+                "Metals MTF candles ready."
+                if readiness.get(
+                    "ready",
+                    False,
+                )
+                else
+                "Building local 15m / 1h / 4h "
+                "metals candle history."
+            ),
+    }
+
+
+# ============================================================
+# STATUS SUMMARY
 # ============================================================
 
 def metals_candle_status(
@@ -595,9 +833,21 @@ def metals_candle_status(
                 False,
             ),
 
+        "state":
+            readiness.get(
+                "state",
+                "WARMING_UP",
+            ),
+
         "timeframes":
             readiness.get(
                 "timeframes",
+                {},
+            ),
+
+        "quote_freshness":
+            readiness.get(
+                "quote_freshness",
                 {},
             ),
 
@@ -607,151 +857,22 @@ def metals_candle_status(
 
 
 # ============================================================
-# HEALTH
-# ============================================================
-
-def metals_candles_health():
-
-    results = {}
-
-    overall_ok = True
-
-    for symbol in (
-        "XAUUSD",
-        "XAGUSD",
-    ):
-
-        try:
-
-            status = (
-                metals_candle_status(
-                    symbol
-                )
-            )
-
-            results[
-                symbol
-            ] = status
-
-        except Exception as error:
-
-            overall_ok = False
-
-            results[
-                symbol
-            ] = {
-                "ready":
-                    False,
-
-                "reason":
-                    str(
-                        error
-                    ),
-            }
-
-    return {
-        "ok":
-            overall_ok,
-
-        "provider":
-            "LOCAL_POSTGRES_OHLC",
-
-        "symbols":
-            results,
-
-        "twelve_data_required":
-            False,
-
-        "metals_dev_required":
-            False,
-
-        "paid_candle_api_required":
-            False,
-    }
-# ============================================================
-# LEGACY / BACKWARD COMPATIBILITY
-# ============================================================
-
-def metals_candles_cache_status(
-    symbol: str,
-) -> Dict:
-    """
-    Backward-compatible function used by metals_scanner.py.
-
-    Older scanner versions imported:
-        metals_candles_cache_status
-
-    V3.7 now uses local PostgreSQL OHLC instead of
-    Twelve Data / external candle cache.
-
-    This adapter preserves the old scanner interface.
-    """
-
-    normalized_symbol = (
-        _normalize_symbol(
-            symbol
-        )
-    )
-
-    readiness = (
-        get_metals_candle_readiness(
-            normalized_symbol
-        )
-    )
-
-    return {
-        "symbol":
-            normalized_symbol,
-
-        "ready":
-            readiness.get(
-                "ready",
-                False,
-            ),
-
-        "cached":
-            True,
-
-        "source":
-            "LOCAL_POSTGRES_OHLC",
-
-        "provider":
-            "LOCAL_POSTGRES_OHLC",
-
-        "timeframes":
-            readiness.get(
-                "timeframes",
-                {},
-            ),
-
-        "external_api":
-            False,
-
-        "twelve_data":
-            False,
-
-        "paid_api_required":
-            False,
-    }
-
-# ============================================================
-# V3.7 SCANNER COMPATIBILITY CACHE STATUS
+# LEGACY / SCANNER COMPATIBILITY
 # ============================================================
 
 def metals_candles_cache_status(
     symbol=None,
-):
+) -> Dict:
     """
-    Compatibility adapter for the existing metals_scanner.py.
+    Compatibility adapter for existing metals_scanner.py.
 
-    Old scanner expects cache records like:
+    Old scanner expects cache-style keys such as:
         XAUUSD:15min:200
         XAUUSD:1h:200
         XAUUSD:4h:200
 
-    V3.7 now builds candles locally from PostgreSQL.
-    This function translates local readiness into the old
-    scanner cache interface without using Twelve Data.
+    V3.8 now maps local PostgreSQL OHLC readiness
+    into that old interface.
     """
 
     symbols = (
@@ -774,6 +895,9 @@ def metals_candles_cache_status(
             False,
 
         "twelve_data_required":
+            False,
+
+        "metals_dev_required":
             False,
 
         "paid_api_required":
@@ -841,9 +965,13 @@ def metals_candles_cache_status(
             minimum = int(
                 tf_status.get(
                     "minimum",
-                    60,
+                    MINIMUM_CANDLES[
+                        timeframe
+                    ],
                 )
-                or 60
+                or MINIMUM_CANDLES[
+                    timeframe
+                ]
             )
 
             result[
@@ -863,11 +991,25 @@ def metals_candles_cache_status(
                 "ready":
                     ready,
 
+                "state":
+                    (
+                        "READY"
+                        if ready
+                        else "WARMING_UP"
+                    ),
+
                 "candles":
                     candle_count,
 
                 "minimum":
                     minimum,
+
+                "remaining":
+                    max(
+                        0,
+                        minimum
+                        - candle_count,
+                    ),
 
                 "source":
                     "LOCAL_POSTGRES_OHLC",
@@ -880,3 +1022,73 @@ def metals_candles_cache_status(
             }
 
     return result
+
+
+# ============================================================
+# HEALTH
+# ============================================================
+
+def metals_candles_health():
+
+    results = {}
+
+    overall_ok = True
+
+    for symbol in (
+        "XAUUSD",
+        "XAGUSD",
+    ):
+
+        try:
+
+            status = (
+                metals_candle_status(
+                    symbol
+                )
+            )
+
+            results[
+                symbol
+            ] = status
+
+        except Exception as error:
+
+            overall_ok = False
+
+            results[
+                symbol
+            ] = {
+                "ready":
+                    False,
+
+                "state":
+                    "ERROR",
+
+                "reason":
+                    str(
+                        error
+                    ),
+            }
+
+    return {
+        "ok":
+            overall_ok,
+
+        "provider":
+            "LOCAL_POSTGRES_OHLC",
+
+        "symbols":
+            results,
+
+        "twelve_data_required":
+            False,
+
+        "metals_dev_required":
+            False,
+
+        "paid_candle_api_required":
+            False,
+
+        "real_orders":
+            False,
+    }
