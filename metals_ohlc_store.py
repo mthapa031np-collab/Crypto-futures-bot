@@ -1,44 +1,73 @@
 """
 metals_ohlc_store.py
 
-PRO AI QUANT TERMINAL V4.2
-CANONICAL 15-MINUTE METALS OHLC STORE
+PRO AI QUANT TERMINAL V4.3
+HYBRID PERSISTENT METALS OHLC ENGINE
 
-Core architecture
------------------
-Gold-API realtime / limited OHLC
-            ↓
-PostgreSQL persistent storage
-            ↓
-Canonical 15m candles
-            ↓
+============================================================
+ARCHITECTURE
+============================================================
+
+INITIAL WARM-UP
+---------------
+Gold-API OHLC
+    ↓
+Direct real historical seeds:
+    15m
+    1h
+    4h
+    ↓
+PostgreSQL metals_seed_candles
+
+LONG-TERM LIVE ENGINE
+---------------------
+Gold-API realtime XAU / XAG
+    ↓
+PostgreSQL metals_ticks
+    ↓
+Canonical local 15m candles
+    ↓
 Local deterministic resampling
-        ↙                 ↘
-      1h                  4h
-            ↓
-     Metals Scanner
+    ↓
+1h + 4h
 
-Design goals
-------------
-- One canonical external candle timeframe: 15m
-- 1h and 4h generated locally
-- No repeated external API calls for higher timeframes
-- Persistent across Render restarts
-- Historical seed + live ticks unified
-- Closed-candle safety
-- Duplicate protection
-- OHLC validation
-- Gap-aware higher timeframe generation
-- Scanner backward compatibility
-- PAPER ONLY
-- NO REAL ORDERS
+HYBRID READER
+-------------
+15m:
+    Historical direct 15m seed
+        +
+    Live 15m aggregation
+
+1h / 4h:
+    Direct real historical seed
+        +
+    Locally-derived candles from canonical 15m
+
+When timestamps overlap:
+    LOCAL_DERIVED wins over DIRECT_SEED
+
+WHY
+---
+- Existing historical API work is never wasted.
+- Scanner can warm up faster from direct 1h / 4h history.
+- Long-term operation stops depending on historical
+  higher-timeframe API requests.
+- PostgreSQL survives Render restarts.
+- No synthetic historical prices are invented.
+- Incomplete candles are excluded.
+- Duplicate timestamps are resolved deterministically.
+
+IMPORTANT
+---------
+PAPER TRADING ONLY.
+REAL ORDERS DISABLED.
 """
 
 from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import Dict
+from typing import Dict, Optional
 
 import pandas as pd
 import psycopg
@@ -61,9 +90,6 @@ SUPPORTED_SYMBOLS = {
 }
 
 
-CANONICAL_TIMEFRAME = "15m"
-
-
 TIMEFRAME_MINUTES = {
     "15m": 15,
     "1h": 60,
@@ -77,7 +103,7 @@ RESAMPLE_RULES = {
 }
 
 
-EXPECTED_15M_PER_TIMEFRAME = {
+EXPECTED_15M_BARS = {
     "15m": 1,
     "1h": 4,
     "4h": 16,
@@ -91,7 +117,7 @@ MINIMUM_CANDLES = {
 }
 
 
-EMPTY_CANDLE_COLUMNS = [
+EMPTY_COLUMNS = [
     "datetime",
     "open",
     "high",
@@ -121,7 +147,7 @@ def _connect():
 
 
 # ============================================================
-# HELPERS
+# GENERIC HELPERS
 # ============================================================
 
 def _utc_now():
@@ -172,10 +198,12 @@ def _normalize_timeframe(
         "1h": "1h",
         "60m": "1h",
         "60min": "1h",
+        "1hour": "1h",
 
         "4h": "4h",
         "240m": "4h",
         "240min": "4h",
+        "4hour": "4h",
     }
 
     normalized = aliases.get(
@@ -221,37 +249,15 @@ def _safe_float(
 def _empty_candles():
 
     return pd.DataFrame(
-        columns=EMPTY_CANDLE_COLUMNS
+        columns=EMPTY_COLUMNS
     )
 
 
-def _floor_timestamp(
-    timestamp,
-    minutes,
-):
+# ============================================================
+# CLOSED-CANDLE BOUNDARIES
+# ============================================================
 
-    ts = pd.Timestamp(
-        timestamp
-    )
-
-    if ts.tzinfo is None:
-
-        ts = ts.tz_localize(
-            "UTC"
-        )
-
-    else:
-
-        ts = ts.tz_convert(
-            "UTC"
-        )
-
-    return ts.floor(
-        f"{minutes}min"
-    )
-
-
-def _last_closed_boundary(
+def _current_boundary(
     timeframe,
 ):
 
@@ -272,11 +278,41 @@ def _last_closed_boundary(
     )
 
 
+def _remove_open_candle(
+    dataframe,
+    timeframe,
+):
+
+    if (
+        dataframe is None
+        or dataframe.empty
+    ):
+
+        return _empty_candles()
+
+    boundary = _current_boundary(
+        timeframe
+    )
+
+    result = dataframe[
+        dataframe["datetime"]
+        < boundary
+    ].copy()
+
+    if result.empty:
+
+        return _empty_candles()
+
+    return result.reset_index(
+        drop=True
+    )
+
+
 # ============================================================
 # OHLC VALIDATION
 # ============================================================
 
-def _validate_ohlc_row(
+def _valid_ohlc_values(
     open_price,
     high_price,
     low_price,
@@ -335,6 +371,125 @@ def _validate_ohlc_row(
     return True
 
 
+def _standardize_candles(
+    dataframe,
+):
+
+    if (
+        dataframe is None
+        or not isinstance(
+            dataframe,
+            pd.DataFrame,
+        )
+        or dataframe.empty
+    ):
+
+        return _empty_candles()
+
+    required = {
+        "datetime",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    }
+
+    if not required.issubset(
+        dataframe.columns
+    ):
+
+        return _empty_candles()
+
+    result = dataframe.copy()
+
+    result["datetime"] = pd.to_datetime(
+        result["datetime"],
+        utc=True,
+        errors="coerce",
+    )
+
+    for column in (
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    ):
+
+        result[column] = pd.to_numeric(
+            result[column],
+            errors="coerce",
+        )
+
+    result = result.dropna(
+        subset=[
+            "datetime",
+            "open",
+            "high",
+            "low",
+            "close",
+        ]
+    )
+
+    if result.empty:
+
+        return _empty_candles()
+
+    valid = (
+        (result["open"] > 0)
+        & (result["high"] > 0)
+        & (result["low"] > 0)
+        & (result["close"] > 0)
+        & (
+            result["high"]
+            >= result["low"]
+        )
+        & (
+            result["high"]
+            >= result["open"]
+        )
+        & (
+            result["high"]
+            >= result["close"]
+        )
+        & (
+            result["low"]
+            <= result["open"]
+        )
+        & (
+            result["low"]
+            <= result["close"]
+        )
+    )
+
+    result = result[
+        valid
+    ]
+
+    if result.empty:
+
+        return _empty_candles()
+
+    result = (
+        result
+        .sort_values(
+            "datetime"
+        )
+        .drop_duplicates(
+            subset=[
+                "datetime"
+            ],
+            keep="last",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    return result
+
+
 # ============================================================
 # TABLE SETUP
 # ============================================================
@@ -346,16 +501,20 @@ def ensure_metals_tables():
         with conn.cursor() as cur:
 
             # ------------------------------------------------
-            # LIVE QUOTE TICKS
+            # REALTIME TICKS
             # ------------------------------------------------
 
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS metals_ticks (
                     id BIGSERIAL PRIMARY KEY,
+
                     symbol TEXT NOT NULL,
+
                     price DOUBLE PRECISION NOT NULL,
+
                     provider TEXT NOT NULL,
+
                     observed_at TIMESTAMPTZ NOT NULL
                 )
                 """
@@ -374,25 +533,32 @@ def ensure_metals_tables():
             )
 
             # ------------------------------------------------
-            # HISTORICAL SEED STORAGE
-            #
-            # Existing table preserved for compatibility.
-            # V4.2 treats 15m as canonical source.
+            # DIRECT HISTORICAL SEEDS
             # ------------------------------------------------
 
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS metals_seed_candles (
                     id BIGSERIAL PRIMARY KEY,
+
                     symbol TEXT NOT NULL,
+
                     timeframe TEXT NOT NULL,
+
                     candle_start TIMESTAMPTZ NOT NULL,
+
                     candle_end TIMESTAMPTZ NOT NULL,
+
                     open DOUBLE PRECISION NOT NULL,
+
                     high DOUBLE PRECISION NOT NULL,
+
                     low DOUBLE PRECISION NOT NULL,
+
                     close DOUBLE PRECISION NOT NULL,
+
                     provider TEXT NOT NULL,
+
                     created_at TIMESTAMPTZ NOT NULL
                         DEFAULT NOW(),
 
@@ -422,7 +588,7 @@ def ensure_metals_tables():
 
 
 # ============================================================
-# STORE LIVE QUOTE
+# STORE REALTIME QUOTE
 # ============================================================
 
 def store_metal_quote(
@@ -448,8 +614,11 @@ def store_metal_quote(
     ):
 
         return {
-            "ok": False,
-            "reason": "Invalid metal price",
+            "ok":
+                False,
+
+            "reason":
+                "Invalid metal price",
         }
 
     if observed_at is None:
@@ -460,10 +629,10 @@ def store_metal_quote(
 
         with conn.cursor() as cur:
 
+            # Avoid exact timestamp duplicates.
             cur.execute(
                 """
                 SELECT
-                    price,
                     observed_at
 
                 FROM metals_ticks
@@ -481,19 +650,27 @@ def store_metal_quote(
 
             latest = cur.fetchone()
 
-            if latest:
+            if (
+                latest
+                and latest[
+                    "observed_at"
+                ]
+                == observed_at
+            ):
 
-                if (
-                    latest["observed_at"]
-                    == observed_at
-                ):
+                return {
+                    "ok":
+                        True,
 
-                    return {
-                        "ok": True,
-                        "duplicate": True,
-                        "symbol": symbol,
-                        "price": price,
-                    }
+                    "duplicate":
+                        True,
+
+                    "symbol":
+                        symbol,
+
+                    "price":
+                        price,
+                }
 
             cur.execute(
                 """
@@ -522,11 +699,21 @@ def store_metal_quote(
         conn.commit()
 
     return {
-        "ok": True,
-        "duplicate": False,
-        "symbol": symbol,
-        "price": price,
-        "provider": provider,
+        "ok":
+            True,
+
+        "duplicate":
+            False,
+
+        "symbol":
+            symbol,
+
+        "price":
+            price,
+
+        "provider":
+            provider,
+
         "observed_at":
             observed_at.isoformat(),
     }
@@ -579,15 +766,21 @@ def get_latest_stored_quote(
 
     return {
         "symbol":
-            row["symbol"],
+            row[
+                "symbol"
+            ],
 
         "price":
             float(
-                row["price"]
+                row[
+                    "price"
+                ]
             ),
 
         "provider":
-            row["provider"],
+            row[
+                "provider"
+            ],
 
         "observed_at":
             row[
@@ -597,12 +790,12 @@ def get_latest_stored_quote(
 
 
 # ============================================================
-# RAW TICKS
+# READ REALTIME TICKS
 # ============================================================
 
 def get_ticks(
     symbol,
-    limit=100000,
+    limit=200000,
 ):
 
     ensure_metals_tables()
@@ -622,13 +815,13 @@ def get_ticks(
         ValueError,
     ):
 
-        limit = 100000
+        limit = 200000
 
     limit = max(
         10,
         min(
             limit,
-            200000,
+            250000,
         ),
     )
 
@@ -667,7 +860,7 @@ def get_ticks(
             ]
         )
 
-    df = pd.DataFrame(
+    dataframe = pd.DataFrame(
         [
             {
                 "datetime":
@@ -687,19 +880,27 @@ def get_ticks(
         ]
     )
 
-    df["datetime"] = pd.to_datetime(
-        df["datetime"],
-        utc=True,
-        errors="coerce",
+    dataframe["datetime"] = (
+        pd.to_datetime(
+            dataframe[
+                "datetime"
+            ],
+            utc=True,
+            errors="coerce",
+        )
     )
 
-    df["price"] = pd.to_numeric(
-        df["price"],
-        errors="coerce",
+    dataframe["price"] = (
+        pd.to_numeric(
+            dataframe[
+                "price"
+            ],
+            errors="coerce",
+        )
     )
 
-    return (
-        df
+    dataframe = (
+        dataframe
         .dropna(
             subset=[
                 "datetime",
@@ -720,15 +921,17 @@ def get_ticks(
         )
     )
 
+    return dataframe
+
 
 # ============================================================
-# READ RAW SEED CANDLES
+# READ DIRECT HISTORICAL SEEDS
 # ============================================================
 
 def get_seed_candles(
     symbol,
-    timeframe="15m",
-    limit=5000,
+    timeframe,
+    limit=10000,
 ):
 
     ensure_metals_tables()
@@ -752,13 +955,13 @@ def get_seed_candles(
         ValueError,
     ):
 
-        limit = 5000
+        limit = 10000
 
     limit = max(
         1,
         min(
             limit,
-            10000,
+            20000,
         ),
     )
 
@@ -803,11 +1006,19 @@ def get_seed_candles(
 
     for row in rows:
 
-        if not _validate_ohlc_row(
-            row["open"],
-            row["high"],
-            row["low"],
-            row["close"],
+        if not _valid_ohlc_values(
+            row[
+                "open"
+            ],
+            row[
+                "high"
+            ],
+            row[
+                "low"
+            ],
+            row[
+                "close"
+            ],
         ):
 
             continue
@@ -821,29 +1032,40 @@ def get_seed_candles(
 
                 "open":
                     float(
-                        row["open"]
+                        row[
+                            "open"
+                        ]
                     ),
 
                 "high":
                     float(
-                        row["high"]
+                        row[
+                            "high"
+                        ]
                     ),
 
                 "low":
                     float(
-                        row["low"]
+                        row[
+                            "low"
+                        ]
                     ),
 
                 "close":
                     float(
-                        row["close"]
+                        row[
+                            "close"
+                        ]
                     ),
 
                 "volume":
                     0.0,
 
                 "_source":
-                    "SEED",
+                    "DIRECT_SEED",
+
+                "_priority":
+                    1,
             }
         )
 
@@ -851,45 +1073,29 @@ def get_seed_candles(
 
         return _empty_candles()
 
-    df = pd.DataFrame(
+    dataframe = pd.DataFrame(
         data
     )
 
-    df["datetime"] = pd.to_datetime(
-        df["datetime"],
-        utc=True,
-        errors="coerce",
+    dataframe = _standardize_candles(
+        dataframe
     )
 
-    return (
-        df
-        .dropna(
-            subset=[
-                "datetime"
-            ]
-        )
-        .sort_values(
-            "datetime"
-        )
-        .drop_duplicates(
-            subset=[
-                "datetime"
-            ],
-            keep="last",
-        )
-        .reset_index(
-            drop=True
-        )
+    dataframe = _remove_open_candle(
+        dataframe,
+        timeframe,
     )
+
+    return dataframe
 
 
 # ============================================================
-# LIVE 15M CANDLES FROM TICKS
+# BUILD LOCAL 15M FROM REALTIME TICKS
 # ============================================================
 
 def build_live_15m_candles(
     symbol,
-    limit=5000,
+    limit=10000,
 ):
 
     symbol = _normalize_symbol(
@@ -898,7 +1104,7 @@ def build_live_15m_candles(
 
     ticks = get_ticks(
         symbol,
-        limit=200000,
+        limit=250000,
     )
 
     if ticks.empty:
@@ -910,11 +1116,14 @@ def build_live_15m_candles(
     )
 
     candles = (
-        work["price"]
+        work[
+            "price"
+        ]
         .resample(
             "15min",
             label="left",
             closed="left",
+            origin="epoch",
         )
         .ohlc()
         .dropna()
@@ -925,35 +1134,39 @@ def build_live_15m_candles(
 
         return _empty_candles()
 
-    # --------------------------------------------------------
-    # REMOVE CURRENT / INCOMPLETE 15M BAR
-    # --------------------------------------------------------
+    candles[
+        "volume"
+    ] = 0.0
 
-    current_boundary = (
-        _last_closed_boundary(
-            "15m"
-        )
+    candles[
+        "_source"
+    ] = "LIVE_15M"
+
+    candles[
+        "_priority"
+    ] = 2
+
+    candles = _standardize_candles(
+        candles
     )
 
-    candles = candles[
-        candles["datetime"]
-        < current_boundary
-    ]
+    candles = _remove_open_candle(
+        candles,
+        "15m",
+    )
 
     if candles.empty:
 
         return _empty_candles()
-
-    candles["volume"] = 0.0
-
-    candles["_source"] = "LIVE"
 
     return (
         candles
         .tail(
             max(
                 1,
-                int(limit),
+                int(
+                    limit
+                ),
             )
         )
         .reset_index(
@@ -963,62 +1176,53 @@ def build_live_15m_candles(
 
 
 # ============================================================
-# CANONICAL 15M DATASET
+# CANONICAL 15M HYBRID DATASET
 # ============================================================
 
 def build_canonical_15m(
     symbol,
-    limit=5000,
+    limit=10000,
 ):
 
     symbol = _normalize_symbol(
         symbol
     )
 
-    try:
-
-        limit = int(
-            limit
-        )
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-
-        limit = 5000
-
-    limit = max(
-        1,
-        min(
-            limit,
-            10000,
-        ),
-    )
-
-    seed = get_seed_candles(
+    direct_seed = get_seed_candles(
         symbol,
         "15m",
-        limit=10000,
+        limit=20000,
     )
 
     live = build_live_15m_candles(
         symbol,
-        limit=10000,
+        limit=20000,
     )
 
     frames = []
 
     if (
         isinstance(
-            seed,
+            direct_seed,
             pd.DataFrame,
         )
-        and not seed.empty
+        and not direct_seed.empty
     ):
 
+        direct_seed = (
+            direct_seed.copy()
+        )
+
+        direct_seed[
+            "_source"
+        ] = "DIRECT_SEED"
+
+        direct_seed[
+            "_priority"
+        ] = 1
+
         frames.append(
-            seed
+            direct_seed
         )
 
     if (
@@ -1028,6 +1232,16 @@ def build_canonical_15m(
         )
         and not live.empty
     ):
+
+        live = live.copy()
+
+        live[
+            "_source"
+        ] = "LIVE_15M"
+
+        live[
+            "_priority"
+        ] = 2
 
         frames.append(
             live
@@ -1042,40 +1256,30 @@ def build_canonical_15m(
         ignore_index=True,
     )
 
-    combined["datetime"] = pd.to_datetime(
-        combined["datetime"],
-        utc=True,
-        errors="coerce",
+    combined = _standardize_candles(
+        combined
     )
 
-    for column in (
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-    ):
+    if combined.empty:
 
-        combined[column] = pd.to_numeric(
-            combined[column],
-            errors="coerce",
-        )
+        return _empty_candles()
+
+    # --------------------------------------------------------
+    # DETERMINE PRIORITY AGAIN AFTER STANDARDIZATION
+    # --------------------------------------------------------
+
+    if "_priority" not in combined.columns:
+
+        combined[
+            "_priority"
+        ] = 1
 
     combined = (
         combined
-        .dropna(
-            subset=[
-                "datetime",
-                "open",
-                "high",
-                "low",
-                "close",
-            ]
-        )
         .sort_values(
             [
                 "datetime",
-                "_source",
+                "_priority",
             ]
         )
         .drop_duplicates(
@@ -1092,51 +1296,10 @@ def build_canonical_15m(
         )
     )
 
-    valid_mask = (
-        (combined["open"] > 0)
-        & (combined["high"] > 0)
-        & (combined["low"] > 0)
-        & (combined["close"] > 0)
-        & (
-            combined["high"]
-            >= combined["low"]
-        )
-        & (
-            combined["high"]
-            >= combined["open"]
-        )
-        & (
-            combined["high"]
-            >= combined["close"]
-        )
-        & (
-            combined["low"]
-            <= combined["open"]
-        )
-        & (
-            combined["low"]
-            <= combined["close"]
-        )
+    combined = _remove_open_candle(
+        combined,
+        "15m",
     )
-
-    combined = combined[
-        valid_mask
-    ]
-
-    # --------------------------------------------------------
-    # REMOVE CURRENT / INCOMPLETE 15M BAR
-    # --------------------------------------------------------
-
-    current_boundary = (
-        _last_closed_boundary(
-            "15m"
-        )
-    )
-
-    combined = combined[
-        combined["datetime"]
-        < current_boundary
-    ]
 
     if combined.empty:
 
@@ -1145,7 +1308,12 @@ def build_canonical_15m(
     return (
         combined
         .tail(
-            limit
+            max(
+                1,
+                int(
+                    limit
+                ),
+            )
         )
         .reset_index(
             drop=True
@@ -1154,13 +1322,13 @@ def build_canonical_15m(
 
 
 # ============================================================
-# LOCAL HIGHER-TIMEFRAME RESAMPLING
+# GAP-AWARE LOCAL RESAMPLING
 # ============================================================
 
-def _resample_from_15m(
+def build_local_resampled_candles(
     symbol,
     timeframe,
-    limit=200,
+    limit=5000,
 ):
 
     symbol = _normalize_symbol(
@@ -1173,35 +1341,34 @@ def _resample_from_15m(
 
     if timeframe == "15m":
 
-        result = build_canonical_15m(
+        canonical = build_canonical_15m(
             symbol,
             limit=limit,
         )
 
-        if result.empty:
+        if canonical.empty:
 
             return _empty_candles()
 
-        return result[
-            EMPTY_CANDLE_COLUMNS
-        ].copy()
+        return canonical
 
     if timeframe not in RESAMPLE_RULES:
 
         return _empty_candles()
 
-    expected_count = (
-        EXPECTED_15M_PER_TIMEFRAME[
+    required_underlying = (
+        EXPECTED_15M_BARS[
             timeframe
         ]
     )
 
-    # Fetch enough canonical bars for requested output.
     source_limit = max(
-        int(limit)
-        * expected_count
-        * 2,
-        500,
+        (
+            int(limit)
+            * required_underlying
+            * 2
+        ),
+        1000,
     )
 
     source = build_canonical_15m(
@@ -1213,9 +1380,9 @@ def _resample_from_15m(
 
         return _empty_candles()
 
-    source = source.copy()
+    working = source.copy()
 
-    source = source.set_index(
+    working = working.set_index(
         "datetime"
     )
 
@@ -1223,10 +1390,11 @@ def _resample_from_15m(
         timeframe
     ]
 
-    grouped = source.resample(
+    grouped = working.resample(
         rule,
         label="left",
         closed="left",
+        origin="epoch",
     )
 
     candles = grouped.agg(
@@ -1259,69 +1427,36 @@ def _resample_from_15m(
     candles = candles.reset_index()
 
     # --------------------------------------------------------
-    # REQUIRE COMPLETE UNDERLYING 15M COVERAGE
+    # REQUIRE COMPLETE 15M COVERAGE
     # --------------------------------------------------------
 
     candles = candles[
         candles[
             "_source_count"
         ]
-        >= expected_count
+        >= required_underlying
     ]
 
     if candles.empty:
 
         return _empty_candles()
 
-    # --------------------------------------------------------
-    # REMOVE CURRENT / INCOMPLETE HIGHER-TF BAR
-    # --------------------------------------------------------
+    candles[
+        "_source"
+    ] = "LOCAL_RESAMPLE"
 
-    current_boundary = (
-        _last_closed_boundary(
-            timeframe
-        )
+    candles[
+        "_priority"
+    ] = 2
+
+    candles = _standardize_candles(
+        candles
     )
 
-    candles = candles[
-        candles["datetime"]
-        < current_boundary
-    ]
-
-    if candles.empty:
-
-        return _empty_candles()
-
-    valid = (
-        (candles["open"] > 0)
-        & (candles["high"] > 0)
-        & (candles["low"] > 0)
-        & (candles["close"] > 0)
-        & (
-            candles["high"]
-            >= candles["low"]
-        )
-        & (
-            candles["high"]
-            >= candles["open"]
-        )
-        & (
-            candles["high"]
-            >= candles["close"]
-        )
-        & (
-            candles["low"]
-            <= candles["open"]
-        )
-        & (
-            candles["low"]
-            <= candles["close"]
-        )
+    candles = _remove_open_candle(
+        candles,
+        timeframe,
     )
-
-    candles = candles[
-        valid
-    ]
 
     if candles.empty:
 
@@ -1332,11 +1467,11 @@ def _resample_from_15m(
         .tail(
             max(
                 1,
-                int(limit),
+                int(
+                    limit
+                ),
             )
-        )[
-            EMPTY_CANDLE_COLUMNS
-        ]
+        )
         .reset_index(
             drop=True
         )
@@ -1344,24 +1479,27 @@ def _resample_from_15m(
 
 
 # ============================================================
-# PUBLIC BUILD_CANDLES API
+# HYBRID HIGHER-TIMEFRAME READER
 # ============================================================
 
-def build_candles(
+def build_hybrid_higher_timeframe(
     symbol,
-    timeframe="15m",
-    limit=200,
+    timeframe,
+    limit=5000,
 ):
 
     """
-    Scanner-compatible public candle reader.
+    Merge:
 
-    V4.2 behavior:
-        15m -> canonical persisted + live dataset
-        1h  -> locally derived from canonical 15m
-        4h  -> locally derived from canonical 15m
+        DIRECT historical seed
+            +
+        LOCAL resampled canonical 15m
 
-    No higher-timeframe provider request is required.
+    Priority:
+        LOCAL_RESAMPLE > DIRECT_SEED
+
+    This preserves initial bootstrap history while allowing
+    realtime-derived candles to take over naturally.
     """
 
     symbol = _normalize_symbol(
@@ -1372,15 +1510,227 @@ def build_candles(
         timeframe
     )
 
-    return _resample_from_15m(
+    if timeframe == "15m":
+
+        return build_canonical_15m(
+            symbol,
+            limit=limit,
+        )
+
+    direct = get_seed_candles(
         symbol,
         timeframe,
-        limit,
+        limit=20000,
+    )
+
+    local = build_local_resampled_candles(
+        symbol,
+        timeframe,
+        limit=20000,
+    )
+
+    frames = []
+
+    if (
+        isinstance(
+            direct,
+            pd.DataFrame,
+        )
+        and not direct.empty
+    ):
+
+        direct = direct.copy()
+
+        direct[
+            "_source"
+        ] = "DIRECT_SEED"
+
+        direct[
+            "_priority"
+        ] = 1
+
+        frames.append(
+            direct
+        )
+
+    if (
+        isinstance(
+            local,
+            pd.DataFrame,
+        )
+        and not local.empty
+    ):
+
+        local = local.copy()
+
+        local[
+            "_source"
+        ] = "LOCAL_RESAMPLE"
+
+        local[
+            "_priority"
+        ] = 2
+
+        frames.append(
+            local
+        )
+
+    if not frames:
+
+        return _empty_candles()
+
+    combined = pd.concat(
+        frames,
+        ignore_index=True,
+    )
+
+    combined = _standardize_candles(
+        combined
+    )
+
+    if combined.empty:
+
+        return _empty_candles()
+
+    if "_priority" not in combined.columns:
+
+        combined[
+            "_priority"
+        ] = 1
+
+    combined = (
+        combined
+        .sort_values(
+            [
+                "datetime",
+                "_priority",
+            ]
+        )
+        .drop_duplicates(
+            subset=[
+                "datetime"
+            ],
+            keep="last",
+        )
+        .sort_values(
+            "datetime"
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    combined = _remove_open_candle(
+        combined,
+        timeframe,
+    )
+
+    if combined.empty:
+
+        return _empty_candles()
+
+    return (
+        combined
+        .tail(
+            max(
+                1,
+                int(
+                    limit
+                ),
+            )
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
 
 # ============================================================
-# MULTI-TIMEFRAME API
+# PUBLIC SCANNER CANDLE API
+# ============================================================
+
+def build_candles(
+    symbol,
+    timeframe="15m",
+    limit=200,
+):
+
+    symbol = _normalize_symbol(
+        symbol
+    )
+
+    timeframe = _normalize_timeframe(
+        timeframe
+    )
+
+    try:
+
+        limit = int(
+            limit
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
+        limit = 200
+
+    limit = max(
+        1,
+        min(
+            limit,
+            10000,
+        ),
+    )
+
+    if timeframe == "15m":
+
+        result = build_canonical_15m(
+            symbol,
+            limit=limit,
+        )
+
+    else:
+
+        result = (
+            build_hybrid_higher_timeframe(
+                symbol,
+                timeframe,
+                limit=limit,
+            )
+        )
+
+    if (
+        result is None
+        or result.empty
+    ):
+
+        return _empty_candles()
+
+    result = _standardize_candles(
+        result
+    )
+
+    if result.empty:
+
+        return _empty_candles()
+
+    return (
+        result[
+            EMPTY_COLUMNS
+        ]
+        .tail(
+            limit
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+# ============================================================
+# MULTI-TIMEFRAME SCANNER API
 # ============================================================
 
 def get_metals_mtf_candles(
@@ -1417,7 +1767,7 @@ def get_metals_mtf_candles(
 
 
 # ============================================================
-# RAW SEED COUNTS
+# DIRECT SEED COUNTS
 # ============================================================
 
 def get_seed_candle_counts(
@@ -1462,7 +1812,9 @@ def get_seed_candle_counts(
                 result[
                     timeframe
                 ] = int(
-                    row["count"]
+                    row[
+                        "count"
+                    ]
                     if row
                     else 0
                 )
@@ -1471,7 +1823,7 @@ def get_seed_candle_counts(
 
 
 # ============================================================
-# EFFECTIVE LOCAL COUNTS
+# EFFECTIVE SCANNER COUNTS
 # ============================================================
 
 def get_effective_candle_counts(
@@ -1493,7 +1845,7 @@ def get_effective_candle_counts(
         candles = build_candles(
             symbol,
             timeframe,
-            limit=5000,
+            limit=10000,
         )
 
         result[
@@ -1527,17 +1879,14 @@ def metals_ohlc_readiness(
         "state":
             "WARMING_UP",
 
-        "canonical_timeframe":
-            CANONICAL_TIMEFRAME,
+        "architecture":
+            "HYBRID_DIRECT_PLUS_LOCAL",
 
-        "higher_timeframes":
-            "LOCAL_RESAMPLE",
+        "canonical_timeframe":
+            "15m",
 
         "timeframes":
             {},
-
-        "source":
-            "POSTGRES_15M_PLUS_LIVE",
     }
 
     all_ready = True
@@ -1601,7 +1950,7 @@ def metals_ohlc_readiness(
 
 
 # ============================================================
-# DATA SOURCE STATUS
+# SOURCE STATUS
 # ============================================================
 
 def metals_ohlc_source_status(
@@ -1612,61 +1961,70 @@ def metals_ohlc_source_status(
         symbol
     )
 
-    raw_seed = get_seed_candle_counts(
-        symbol
+    seed_counts = (
+        get_seed_candle_counts(
+            symbol
+        )
     )
 
-    effective = get_effective_candle_counts(
-        symbol
+    effective_counts = (
+        get_effective_candle_counts(
+            symbol
+        )
     )
 
-    live_ticks = get_ticks(
+    ticks = get_ticks(
         symbol,
-        limit=200000,
+        limit=250000,
     )
 
-    readiness = metals_ohlc_readiness(
-        symbol
+    readiness = (
+        metals_ohlc_readiness(
+            symbol
+        )
     )
 
     return {
         "symbol":
             symbol,
 
-        "canonical_timeframe":
-            "15m",
+        "engine":
+            "V4.3 Hybrid Metals OHLC",
 
-        "raw_seed_counts":
-            raw_seed,
+        "direct_seed_counts":
+            seed_counts,
 
         "effective_counts":
-            effective,
+            effective_counts,
 
         "live_tick_count":
             len(
-                live_ticks
+                ticks
             ),
 
         "readiness":
             readiness,
 
-        "historical_source":
-            "Gold-API limited 15m seed",
+        "historical_bootstrap":
+            "DIRECT_15M_1H_4H",
 
-        "live_source":
-            "Gold-API realtime",
+        "long_term_engine":
+            "REALTIME_15M_PLUS_LOCAL_RESAMPLE",
 
-        "higher_timeframe_source":
-            "LOCAL_15M_RESAMPLE",
+        "higher_tf_fallback":
+            "DIRECT_SEED",
 
         "storage":
             "PostgreSQL",
 
-        "requires_external_1h":
+        "twelve_data_required":
             False,
 
-        "requires_external_4h":
+        "metals_dev_required":
             False,
+
+        "paper_only":
+            True,
 
         "real_orders":
             False,
@@ -1674,7 +2032,7 @@ def metals_ohlc_source_status(
 
 
 # ============================================================
-# CACHE STATUS COMPATIBILITY
+# BACKWARD-COMPATIBLE CACHE STATUS
 # ============================================================
 
 def metals_candles_cache_status(
@@ -1690,42 +2048,114 @@ def metals_candles_cache_status(
         ]
     )
 
-    result = {}
+    result = {
+        "provider":
+            "HYBRID_POSTGRES_OHLC",
 
-    for item in symbols:
+        "external_api":
+            False,
 
-        normalized = _normalize_symbol(
-            item
+        "paid_candle_api_required":
+            False,
+    }
+
+    for raw_symbol in symbols:
+
+        normalized = (
+            _normalize_symbol(
+                raw_symbol
+            )
         )
 
-        readiness = metals_ohlc_readiness(
-            normalized
+        readiness = (
+            metals_ohlc_readiness(
+                normalized
+            )
         )
 
-        result[
-            normalized
-        ] = {
-            "ready":
-                readiness[
-                    "ready"
-                ],
+        timeframes = readiness.get(
+            "timeframes",
+            {},
+        )
 
-            "state":
-                readiness[
-                    "state"
-                ],
+        key_map = {
+            "15m":
+                f"{normalized}:15min:200",
 
-            "timeframes":
-                readiness[
-                    "timeframes"
-                ],
+            "1h":
+                f"{normalized}:1h:200",
 
-            "canonical_timeframe":
-                "15m",
-
-            "higher_timeframes":
-                "LOCAL_RESAMPLE",
+            "4h":
+                f"{normalized}:4h:200",
         }
+
+        for timeframe, cache_key in (
+            key_map.items()
+        ):
+
+            info = timeframes.get(
+                timeframe,
+                {},
+            )
+
+            ready = bool(
+                info.get(
+                    "ready",
+                    False,
+                )
+            )
+
+            result[
+                cache_key
+            ] = {
+                "ready":
+                    ready,
+
+                "fresh":
+                    ready,
+
+                "state":
+                    (
+                        "READY"
+                        if ready
+                        else "WARMING_UP"
+                    ),
+
+                "candles":
+                    int(
+                        info.get(
+                            "candles",
+                            0,
+                        )
+                        or 0
+                    ),
+
+                "minimum":
+                    int(
+                        info.get(
+                            "minimum",
+                            60,
+                        )
+                        or 60
+                    ),
+
+                "remaining":
+                    int(
+                        info.get(
+                            "remaining",
+                            0,
+                        )
+                        or 0
+                    ),
+
+                "source":
+                    (
+                        "HYBRID_DIRECT_PLUS_LOCAL"
+                    ),
+
+                "external_api":
+                    False,
+            }
 
     return result
 
@@ -1740,11 +2170,11 @@ def metals_ohlc_health():
 
         ensure_metals_tables()
 
-        gold = metals_ohlc_readiness(
+        gold = metals_ohlc_source_status(
             "XAUUSD"
         )
 
-        silver = metals_ohlc_readiness(
+        silver = metals_ohlc_source_status(
             "XAGUSD"
         )
 
@@ -1756,18 +2186,22 @@ def metals_ohlc_health():
                 "ONLINE",
 
             "engine":
-                "V4.2 Canonical Metals OHLC",
+                "V4.3 Hybrid Metals OHLC",
+
+            "architecture":
+                (
+                    "DIRECT_INITIAL_HISTORY"
+                    " + "
+                    "LOCAL_LONG_TERM_RESAMPLE"
+                ),
 
             "canonical_timeframe":
                 "15m",
 
-            "higher_timeframe_engine":
-                "LOCAL_RESAMPLE",
-
-            "historical_source":
+            "historical_provider":
                 "Gold-API",
 
-            "live_source":
+            "live_provider":
                 "Gold-API realtime",
 
             "gold":
@@ -1776,16 +2210,16 @@ def metals_ohlc_health():
             "silver":
                 silver,
 
+            "restart_safe":
+                True,
+
+            "persistent":
+                True,
+
             "twelve_data_required":
                 False,
 
             "metals_dev_required":
-                False,
-
-            "external_1h_required":
-                False,
-
-            "external_4h_required":
                 False,
 
             "paper_only":
@@ -1805,7 +2239,7 @@ def metals_ohlc_health():
                 "ERROR",
 
             "engine":
-                "V4.2 Canonical Metals OHLC",
+                "V4.3 Hybrid Metals OHLC",
 
             "reason":
                 str(
