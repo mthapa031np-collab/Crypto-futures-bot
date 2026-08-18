@@ -2,254 +2,87 @@
 metals_candles.py
 
 PRO AI QUANT TERMINAL V3.7
+LOCAL METALS CANDLE ENGINE
 
-Quota-Safe Historical / Intraday Candle Provider for Metals.
+Primary candle source:
+    PostgreSQL metals_ticks
 
-Provider:
-    Twelve Data
+Built from:
+    Gold-API live XAU / XAG quotes
 
 Supported:
-    XAUUSD -> XAU/USD
-    XAGUSD -> XAG/USD
+    XAUUSD
+    XAGUSD
 
 Timeframes:
     15m
     1h
     4h
-    1day
 
-Features:
-- Candle caching
-- 429 / API-credit protection
-- Provider cooldown
-- Last-good candle preservation
-- Duplicate log suppression
-- MTF-safe fetching
-- Paper trading only
+Purpose
+-------
+- Remove Twelve Data candle dependency
+- Remove paid commodity API dependency
+- Build persistent OHLC candles locally
+- Feed existing Metals scanner / MTF engine
+- Safe readiness checks
+- Never invent candle data
 
-Environment variable required:
-    TWELVE_DATA_API_KEY
-
-Optional environment variables:
-    METALS_CANDLE_CACHE_SECONDS
-    METALS_CANDLE_STALE_SECONDS
-    METALS_CANDLE_COOLDOWN_SECONDS
-    METALS_CANDLE_LOG_SECONDS
+IMPORTANT
+---------
+PAPER TRADING ONLY
+NO REAL ORDERS
 """
 
-import os
-import time
-import threading
-from copy import deepcopy
-from typing import Dict
+from __future__ import annotations
 
-import requests
+from typing import Dict, Optional
+
 import pandas as pd
 
-
-# ============================================================
-# CONFIG
-# ============================================================
-
-TWELVE_DATA_API_KEY = os.environ.get(
-    "TWELVE_DATA_API_KEY",
-    "",
-).strip()
-
-BASE_URL = (
-    "https://api.twelvedata.com/time_series"
-)
-
-REQUEST_TIMEOUT = 15
-
-
-METALS_CANDLE_CACHE_SECONDS = int(
-    os.environ.get(
-        "METALS_CANDLE_CACHE_SECONDS",
-        "300",
-    )
-)
-
-METALS_CANDLE_STALE_SECONDS = int(
-    os.environ.get(
-        "METALS_CANDLE_STALE_SECONDS",
-        "1800",
-    )
-)
-
-METALS_CANDLE_COOLDOWN_SECONDS = int(
-    os.environ.get(
-        "METALS_CANDLE_COOLDOWN_SECONDS",
-        "600",
-    )
-)
-
-METALS_CANDLE_LOG_SECONDS = int(
-    os.environ.get(
-        "METALS_CANDLE_LOG_SECONDS",
-        "300",
-    )
+from metals_ohlc_store import (
+    build_candles,
+    get_metals_mtf_candles,
+    metals_ohlc_readiness,
 )
 
 
 # ============================================================
-# SYMBOL MAP
+# SUPPORTED MARKETS
 # ============================================================
 
-SYMBOL_MAP = {
-    "XAUUSD": "XAU/USD",
-    "XAGUSD": "XAG/USD",
+SUPPORTED_SYMBOLS = {
+    "XAUUSD",
+    "XAGUSD",
 }
 
 
 # ============================================================
-# TIMEFRAME MAP
+# TIMEFRAME NORMALIZATION
 # ============================================================
 
-TIMEFRAME_MAP = {
-    "15m": "15min",
-    "15min": "15min",
+TIMEFRAME_ALIASES = {
+    # 15 minute
+    "15m": "15m",
+    "15min": "15m",
+    "15": "15m",
+    "15minute": "15m",
+    "15minutes": "15m",
 
+    # 1 hour
     "1h": "1h",
     "60m": "1h",
+    "60min": "1h",
+    "60": "1h",
+    "1hour": "1h",
 
+    # 4 hour
     "4h": "4h",
     "240m": "4h",
-
-    "1d": "1day",
-    "1day": "1day",
+    "240min": "4h",
+    "240": "4h",
+    "4hour": "4h",
 }
-
-
-# ============================================================
-# RUNTIME STATE
-# ============================================================
-
-_state_lock = threading.RLock()
-
-_candle_cache = {}
-
-_last_good_candles = {}
-
-_provider_cooldown_until = 0.0
-
-_last_error_logs = {}
-
-
-# ============================================================
-# TIME HELPERS
-# ============================================================
-
-def _now() -> float:
-    return time.monotonic()
-
-
-def _age(
-    timestamp: float,
-) -> float:
-
-    if not timestamp:
-        return float("inf")
-
-    return max(
-        0.0,
-        _now() - timestamp,
-    )
-
-
-# ============================================================
-# LOG THROTTLING
-# ============================================================
-
-def _log_once(
-    key: str,
-    message: str,
-    interval: int = None,
-):
-
-    if interval is None:
-        interval = (
-            METALS_CANDLE_LOG_SECONDS
-        )
-
-    current = _now()
-
-    with _state_lock:
-
-        previous = (
-            _last_error_logs.get(
-                key,
-                0.0,
-            )
-        )
-
-        if (
-            current - previous
-            < interval
-        ):
-            return
-
-        _last_error_logs[
-            key
-        ] = current
-
-    print(
-        message,
-        flush=True,
-    )
-
-
-# ============================================================
-# PROVIDER COOLDOWN
-# ============================================================
-
-def _provider_available() -> bool:
-
-    with _state_lock:
-
-        cooldown_until = (
-            _provider_cooldown_until
-        )
-
-    return (
-        _now()
-        >= cooldown_until
-    )
-
-
-def _set_provider_cooldown(
-    seconds: int,
-):
-
-    global _provider_cooldown_until
-
-    with _state_lock:
-
-        _provider_cooldown_until = max(
-            _provider_cooldown_until,
-            _now()
-            + max(
-                1,
-                int(seconds),
-            ),
-        )
-
-
-def _provider_cooldown_remaining() -> int:
-
-    with _state_lock:
-
-        remaining = (
-            _provider_cooldown_until
-            - _now()
-        )
-
-    return max(
-        0,
-        int(
-            remaining
-        ),
-    )
 
 
 # ============================================================
@@ -260,7 +93,7 @@ def _normalize_symbol(
     symbol: str,
 ) -> str:
 
-    return (
+    normalized = (
         str(symbol)
         .upper()
         .replace("/", "")
@@ -269,455 +102,134 @@ def _normalize_symbol(
         .strip()
     )
 
+    if normalized not in SUPPORTED_SYMBOLS:
+
+        raise ValueError(
+            f"Unsupported metals symbol: {symbol}"
+        )
+
+    return normalized
+
 
 def _normalize_timeframe(
-    timeframe: str,
+    timeframe,
 ) -> str:
 
-    timeframe = (
+    key = (
         str(timeframe)
         .lower()
+        .replace(" ", "")
         .strip()
     )
 
-    if timeframe not in TIMEFRAME_MAP:
+    normalized = (
+        TIMEFRAME_ALIASES.get(
+            key
+        )
+    )
+
+    if normalized is None:
 
         raise ValueError(
             f"Unsupported metals timeframe: "
             f"{timeframe}"
         )
 
-    return TIMEFRAME_MAP[
-        timeframe
-    ]
+    return normalized
 
 
-def _require_api_key():
+def _empty_candles():
 
-    if not TWELVE_DATA_API_KEY:
-
-        raise RuntimeError(
-            "TWELVE_DATA_API_KEY "
-            "is not configured."
-        )
-
-
-def _cache_key(
-    symbol: str,
-    timeframe: str,
-    outputsize: int,
-) -> str:
-
-    normalized_symbol = (
-        _normalize_symbol(
-            symbol
-        )
-    )
-
-    interval = (
-        _normalize_timeframe(
-            timeframe
-        )
-    )
-
-    return (
-        f"{normalized_symbol}:"
-        f"{interval}:"
-        f"{int(outputsize)}"
+    return pd.DataFrame(
+        columns=[
+            "datetime",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
     )
 
 
-def _copy_df(
-    df: pd.DataFrame,
+def _standardize_dataframe(
+    df: Optional[pd.DataFrame],
 ) -> pd.DataFrame:
-
-    if df is None:
-        return pd.DataFrame()
-
-    return df.copy(
-        deep=True
-    )
-
-
-# ============================================================
-# CACHE HELPERS
-# ============================================================
-
-def _get_fresh_cached_candles(
-    key: str,
-) -> pd.DataFrame:
-
-    with _state_lock:
-
-        record = (
-            _candle_cache.get(
-                key
-            )
-        )
-
-        if not record:
-            return pd.DataFrame()
-
-        timestamp = record.get(
-            "timestamp",
-            0.0,
-        )
-
-        if (
-            _age(timestamp)
-            > METALS_CANDLE_CACHE_SECONDS
-        ):
-            return pd.DataFrame()
-
-        df = _copy_df(
-            record.get(
-                "df"
-            )
-        )
-
-    return df
-
-
-def _store_good_candles(
-    key: str,
-    df: pd.DataFrame,
-):
 
     if (
         df is None
+        or not isinstance(
+            df,
+            pd.DataFrame,
+        )
         or df.empty
     ):
-        return
 
-    record = {
-        "timestamp":
-            _now(),
+        return _empty_candles()
 
-        "df":
-            _copy_df(
-                df
-            ),
-    }
-
-    with _state_lock:
-
-        _candle_cache[
-            key
-        ] = deepcopy(
-            record
-        )
-
-        _last_good_candles[
-            key
-        ] = deepcopy(
-            record
-        )
-
-
-def _get_last_good_candles(
-    key: str,
-) -> pd.DataFrame:
-
-    with _state_lock:
-
-        record = (
-            _last_good_candles.get(
-                key
-            )
-        )
-
-        if not record:
-            return pd.DataFrame()
-
-        timestamp = record.get(
-            "timestamp",
-            0.0,
-        )
-
-        if (
-            _age(timestamp)
-            > METALS_CANDLE_STALE_SECONDS
-        ):
-            return pd.DataFrame()
-
-        df = _copy_df(
-            record.get(
-                "df"
-            )
-        )
-
-    return df
-
-
-# ============================================================
-# RATE LIMIT DETECTION
-# ============================================================
-
-def _looks_like_rate_limit(
-    status_code: int,
-    body,
-) -> bool:
-
-    if status_code == 429:
-        return True
-
-    text = str(
-        body
-    ).lower()
-
-    markers = (
-        "too many requests",
-        "api credits",
-        "credits",
-        "rate limit",
-        "run out",
-        "limit being",
-    )
-
-    return any(
-        marker in text
-        for marker in markers
-    )
-
-
-# ============================================================
-# FETCH RAW CANDLES
-# ============================================================
-
-def get_metals_candles_raw(
-    symbol: str,
-    timeframe: str = "15m",
-    outputsize: int = 200,
-) -> Dict:
-
-    _require_api_key()
-
-    normalized_symbol = (
-        _normalize_symbol(
-            symbol
-        )
-    )
-
-    if normalized_symbol not in SYMBOL_MAP:
-
-        raise ValueError(
-            f"Unsupported metal symbol: "
-            f"{symbol}"
-        )
-
-    interval = (
-        _normalize_timeframe(
-            timeframe
-        )
-    )
-
-    if not _provider_available():
-
-        remaining = (
-            _provider_cooldown_remaining()
-        )
-
-        raise RuntimeError(
-            "Twelve Data candle provider "
-            "temporarily paused for "
-            "rate-limit protection "
-            f"({remaining}s remaining)."
-        )
-
-    params = {
-        "symbol":
-            SYMBOL_MAP[
-                normalized_symbol
-            ],
-
-        "interval":
-            interval,
-
-        "outputsize":
-            int(
-                outputsize
-            ),
-
-        "apikey":
-            TWELVE_DATA_API_KEY,
-
-        "format":
-            "JSON",
-    }
-
-    try:
-
-        response = requests.get(
-            BASE_URL,
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-        )
-
-    except requests.RequestException as error:
-
-        _set_provider_cooldown(
-            METALS_CANDLE_COOLDOWN_SECONDS
-        )
-
-        raise RuntimeError(
-            "Twelve Data candle "
-            f"network error: {error}"
-        ) from error
-
-    if not response.ok:
-
-        try:
-
-            body = (
-                response.json()
-            )
-
-        except Exception:
-
-            body = (
-                response.text[:500]
-            )
-
-        if _looks_like_rate_limit(
-            response.status_code,
-            body,
-        ):
-
-            _set_provider_cooldown(
-                METALS_CANDLE_COOLDOWN_SECONDS
-            )
-
-            raise RuntimeError(
-                "Twelve Data candle "
-                "rate/API-credit limit reached. "
-                "Provider paused automatically."
-            )
-
-        raise RuntimeError(
-            "Twelve Data HTTP "
-            f"{response.status_code}: "
-            f"{body}"
-        )
-
-    try:
-
-        data = response.json()
-
-    except Exception as error:
-
-        raise RuntimeError(
-            "Invalid Twelve Data "
-            "JSON response."
-        ) from error
-
-    if not isinstance(
-        data,
-        dict,
-    ):
-
-        raise RuntimeError(
-            "Invalid Twelve Data response."
-        )
-
-    if (
-        str(
-            data.get(
-                "status",
-                ""
-            )
-        ).lower()
-        == "error"
-    ):
-
-        if _looks_like_rate_limit(
-            200,
-            data,
-        ):
-
-            _set_provider_cooldown(
-                METALS_CANDLE_COOLDOWN_SECONDS
-            )
-
-        raise RuntimeError(
-            data.get(
-                "message",
-                "Twelve Data API error",
-            )
-        )
-
-    return data
-
-
-# ============================================================
-# PARSE TO DATAFRAME
-# ============================================================
-
-def parse_metals_candles(
-    payload: Dict,
-) -> pd.DataFrame:
-
-    values = payload.get(
-        "values"
-    )
-
-    if not values:
-
-        return pd.DataFrame()
-
-    df = pd.DataFrame(
-        values
-    )
-
-    required_columns = [
+    required = {
         "datetime",
         "open",
         "high",
         "low",
         "close",
-    ]
+        "volume",
+    }
 
-    for column in required_columns:
-
-        if column not in df.columns:
-
-            return pd.DataFrame()
-
-    df[
-        "datetime"
-    ] = pd.to_datetime(
-        df[
-            "datetime"
-        ],
-        utc=True,
-        errors="coerce",
+    missing = (
+        required
+        - set(
+            df.columns
+        )
     )
 
-    numeric_columns = [
+    if missing:
+
+        print(
+            "[METALS CANDLE FORMAT ERROR] "
+            f"missing columns: "
+            f"{sorted(missing)}",
+            flush=True,
+        )
+
+        return _empty_candles()
+
+    result = df[
+        [
+            "datetime",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+    ].copy()
+
+    result["datetime"] = (
+        pd.to_datetime(
+            result["datetime"],
+            utc=True,
+            errors="coerce",
+        )
+    )
+
+    for column in (
         "open",
         "high",
         "low",
         "close",
-    ]
+        "volume",
+    ):
 
-    if "volume" in df.columns:
-
-        numeric_columns.append(
-            "volume"
+        result[column] = (
+            pd.to_numeric(
+                result[column],
+                errors="coerce",
+            )
         )
 
-    for column in numeric_columns:
-
-        df[
-            column
-        ] = pd.to_numeric(
-            df[
-                column
-            ],
-            errors="coerce",
-        )
-
-    df = (
-        df
+    result = (
+        result
         .dropna(
             subset=[
                 "datetime",
@@ -730,279 +242,429 @@ def parse_metals_candles(
         .sort_values(
             "datetime"
         )
+        .drop_duplicates(
+            subset=[
+                "datetime"
+            ],
+            keep="last",
+        )
         .reset_index(
             drop=True
         )
     )
 
-    return df
+    if result.empty:
+
+        return _empty_candles()
+
+    return result
 
 
 # ============================================================
-# PUBLIC CANDLE FUNCTION
+# MAIN CANDLE FUNCTION
 # ============================================================
 
 def get_metals_candles(
     symbol: str,
-    timeframe: str = "15m",
-    outputsize: int = 200,
+    timeframe="15m",
+    limit: int = 200,
+) -> pd.DataFrame:
+    """
+    Return locally-built OHLC candles.
+
+    This function intentionally performs NO external
+    candle API requests.
+
+    Source:
+        metals_ticks PostgreSQL table
+            ↓
+        local OHLC aggregation
+    """
+
+    normalized_symbol = (
+        _normalize_symbol(
+            symbol
+        )
+    )
+
+    normalized_timeframe = (
+        _normalize_timeframe(
+            timeframe
+        )
+    )
+
+    try:
+
+        limit = int(
+            limit
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
+        limit = 200
+
+    limit = max(
+        1,
+        min(
+            limit,
+            1000,
+        ),
+    )
+
+    try:
+
+        candles = build_candles(
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
+            limit=limit,
+        )
+
+        return (
+            _standardize_dataframe(
+                candles
+            )
+        )
+
+    except Exception as error:
+
+        print(
+            "[LOCAL METALS CANDLE ERROR] "
+            f"{normalized_symbol} "
+            f"{normalized_timeframe}: "
+            f"{error}",
+            flush=True,
+        )
+
+        return _empty_candles()
+
+
+# ============================================================
+# BACKWARD-COMPATIBLE ALIAS
+# ============================================================
+
+def get_metal_candles(
+    symbol: str,
+    timeframe="15m",
+    limit: int = 200,
+) -> pd.DataFrame:
+    """
+    Compatibility alias for older scanner code.
+    """
+
+    return get_metals_candles(
+        symbol=symbol,
+        timeframe=timeframe,
+        limit=limit,
+    )
+
+
+# ============================================================
+# 15M
+# ============================================================
+
+def get_15m_candles(
+    symbol: str,
+    limit: int = 200,
 ) -> pd.DataFrame:
 
-    key = _cache_key(
-        symbol,
-        timeframe,
-        outputsize,
+    return get_metals_candles(
+        symbol=symbol,
+        timeframe="15m",
+        limit=limit,
     )
-
-    # --------------------------------------------------------
-    # 1. Fresh cache
-    # --------------------------------------------------------
-
-    cached = (
-        _get_fresh_cached_candles(
-            key
-        )
-    )
-
-    if not cached.empty:
-        return cached
-
-    # --------------------------------------------------------
-    # 2. Provider call
-    # --------------------------------------------------------
-
-    if _provider_available():
-
-        try:
-
-            raw = (
-                get_metals_candles_raw(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    outputsize=outputsize,
-                )
-            )
-
-            df = (
-                parse_metals_candles(
-                    raw
-                )
-            )
-
-            if not df.empty:
-
-                _store_good_candles(
-                    key,
-                    df,
-                )
-
-                return df
-
-        except Exception as error:
-
-            _log_once(
-                f"candle_error_"
-                f"{_normalize_symbol(symbol)}_"
-                f"{_normalize_timeframe(timeframe)}",
-                "[METALS CANDLE ERROR] "
-                f"{symbol} "
-                f"{timeframe}: "
-                f"{error}",
-            )
-
-    # --------------------------------------------------------
-    # 3. Last-good stale candles
-    # --------------------------------------------------------
-
-    stale = (
-        _get_last_good_candles(
-            key
-        )
-    )
-
-    if not stale.empty:
-
-        _log_once(
-            f"candle_cache_"
-            f"{_normalize_symbol(symbol)}_"
-            f"{_normalize_timeframe(timeframe)}",
-            "[METALS CANDLE CACHE] "
-            f"{symbol} {timeframe}: "
-            "using last-good cached candles",
-        )
-
-        return stale
-
-    return pd.DataFrame()
 
 
 # ============================================================
-# MULTI-TIMEFRAME SNAPSHOT
+# 1H
 # ============================================================
 
-def get_metals_mtf_candles(
+def get_1h_candles(
     symbol: str,
+    limit: int = 200,
+) -> pd.DataFrame:
+
+    return get_metals_candles(
+        symbol=symbol,
+        timeframe="1h",
+        limit=limit,
+    )
+
+
+# ============================================================
+# 4H
+# ============================================================
+
+def get_4h_candles(
+    symbol: str,
+    limit: int = 200,
+) -> pd.DataFrame:
+
+    return get_metals_candles(
+        symbol=symbol,
+        timeframe="4h",
+        limit=limit,
+    )
+
+
+# ============================================================
+# MTF BUNDLE
+# ============================================================
+
+def get_mtf_metals_candles(
+    symbol: str,
+    limit: int = 200,
 ) -> Dict[str, pd.DataFrame]:
 
-    results = {}
-
-    timeframes = (
-        ("15m", 200),
-        ("1h", 200),
-        ("4h", 200),
+    normalized_symbol = (
+        _normalize_symbol(
+            symbol
+        )
     )
 
-    for timeframe, outputsize in timeframes:
+    try:
 
-        results[
-            timeframe
-        ] = get_metals_candles(
-            symbol=symbol,
-            timeframe=timeframe,
-            outputsize=outputsize,
+        bundle = (
+            get_metals_mtf_candles(
+                symbol=normalized_symbol,
+                limit=limit,
+            )
         )
 
-        # IMPORTANT:
-        # Small spacing avoids burst requests
-        # when provider is actually being called.
-        if _provider_available():
-            time.sleep(
-                0.35
-            )
+        return {
+            "15m":
+                _standardize_dataframe(
+                    bundle.get(
+                        "15m"
+                    )
+                ),
 
-    return results
+            "1h":
+                _standardize_dataframe(
+                    bundle.get(
+                        "1h"
+                    )
+                ),
+
+            "4h":
+                _standardize_dataframe(
+                    bundle.get(
+                        "4h"
+                    )
+                ),
+        }
+
+    except Exception as error:
+
+        print(
+            "[METALS MTF CANDLE ERROR] "
+            f"{normalized_symbol}: "
+            f"{error}",
+            flush=True,
+        )
+
+        return {
+            "15m":
+                _empty_candles(),
+
+            "1h":
+                _empty_candles(),
+
+            "4h":
+                _empty_candles(),
+        }
 
 
 # ============================================================
-# HEALTH CHECK
+# BACKWARD-COMPATIBLE MTF ALIAS
 # ============================================================
 
-def metals_candles_health(
-    symbol: str = "XAUUSD",
+def get_metals_multi_timeframe_candles(
+    symbol: str,
+    limit: int = 200,
+) -> Dict[str, pd.DataFrame]:
+
+    return get_mtf_metals_candles(
+        symbol=symbol,
+        limit=limit,
+    )
+
+
+# ============================================================
+# READINESS
+# ============================================================
+
+def get_metals_candle_readiness(
+    symbol: str,
 ) -> Dict:
 
-    if not TWELVE_DATA_API_KEY:
-
-        return {
-            "ok":
-                False,
-
-            "provider":
-                "Twelve Data",
-
-            "reason":
-                "TWELVE_DATA_API_KEY "
-                "is not configured",
-        }
-
-    df = (
-        get_metals_candles(
-            symbol=symbol,
-            timeframe="15m",
-            outputsize=20,
+    normalized_symbol = (
+        _normalize_symbol(
+            symbol
         )
     )
 
-    if df.empty:
+    try:
+
+        return (
+            metals_ohlc_readiness(
+                normalized_symbol
+            )
+        )
+
+    except Exception as error:
 
         return {
-            "ok":
+            "symbol":
+                normalized_symbol,
+
+            "ready":
                 False,
 
-            "provider":
-                "Twelve Data",
+            "timeframes":
+                {},
 
             "reason":
-                f"No candle data for "
-                f"{symbol}",
-
-            "cooldown_seconds":
-                _provider_cooldown_remaining(),
+                str(
+                    error
+                ),
         }
 
+
+# ============================================================
+# SCANNER SAFETY
+# ============================================================
+
+def metals_candles_ready(
+    symbol: str,
+) -> bool:
+    """
+    True only after enough locally-built history
+    exists for the MTF scanner.
+    """
+
+    readiness = (
+        get_metals_candle_readiness(
+            symbol
+        )
+    )
+
+    return bool(
+        readiness.get(
+            "ready",
+            False,
+        )
+    )
+
+
+# ============================================================
+# CANDLE STATUS SUMMARY
+# ============================================================
+
+def metals_candle_status(
+    symbol: str,
+) -> Dict:
+
+    normalized_symbol = (
+        _normalize_symbol(
+            symbol
+        )
+    )
+
+    readiness = (
+        get_metals_candle_readiness(
+            normalized_symbol
+        )
+    )
+
     return {
-        "ok":
-            True,
+        "symbol":
+            normalized_symbol,
 
         "provider":
-            "Twelve Data",
+            "LOCAL_POSTGRES_OHLC",
 
-        "symbol":
-            symbol,
+        "external_candle_api":
+            False,
 
-        "candles":
-            len(df),
-
-        "latest_close":
-            float(
-                df.iloc[-1][
-                    "close"
-                ]
+        "ready":
+            readiness.get(
+                "ready",
+                False,
             ),
 
-        "latest_time":
-            str(
-                df.iloc[-1][
-                    "datetime"
-                ]
+        "timeframes":
+            readiness.get(
+                "timeframes",
+                {},
             ),
 
-        "cooldown_seconds":
-            _provider_cooldown_remaining(),
+        "real_orders":
+            False,
     }
 
 
 # ============================================================
-# CACHE STATUS
+# HEALTH
 # ============================================================
 
-def metals_candles_cache_status() -> Dict:
+def metals_candles_health():
 
-    result = {}
+    results = {}
 
-    with _state_lock:
+    overall_ok = True
 
-        items = list(
-            _last_good_candles.items()
-        )
+    for symbol in (
+        "XAUUSD",
+        "XAGUSD",
+    ):
 
-    for key, record in items:
+        try:
 
-        age_seconds = (
-            _age(
-                record.get(
-                    "timestamp",
-                    0.0,
+            status = (
+                metals_candle_status(
+                    symbol
                 )
             )
-        )
 
-        result[
-            key
-        ] = {
-            "age_seconds":
-                round(
-                    age_seconds,
-                    1,
-                ),
+            results[
+                symbol
+            ] = status
 
-            "fresh":
-                (
-                    age_seconds
-                    <= METALS_CANDLE_CACHE_SECONDS
-                ),
+        except Exception as error:
 
-            "stale_usable":
-                (
-                    age_seconds
-                    <= METALS_CANDLE_STALE_SECONDS
-                ),
-        }
+            overall_ok = False
 
-    result[
-        "provider_cooldown_seconds"
-    ] = (
-        _provider_cooldown_remaining()
-    )
+            results[
+                symbol
+            ] = {
+                "ready":
+                    False,
 
-    return result
+                "reason":
+                    str(
+                        error
+                    ),
+            }
+
+    return {
+        "ok":
+            overall_ok,
+
+        "provider":
+            "LOCAL_POSTGRES_OHLC",
+
+        "symbols":
+            results,
+
+        "twelve_data_required":
+            False,
+
+        "metals_dev_required":
+            False,
+
+        "paid_candle_api_required":
+            False,
+    }
