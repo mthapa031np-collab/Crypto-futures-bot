@@ -668,3 +668,69 @@ def metals_candles_health():
         "paid_candle_api_required":
             False,
     }
+# ============================================================
+# LEGACY / BACKWARD COMPATIBILITY
+# ============================================================
+
+def metals_candles_cache_status(
+    symbol: str,
+) -> Dict:
+    """
+    Backward-compatible function used by metals_scanner.py.
+
+    Older scanner versions imported:
+        metals_candles_cache_status
+
+    V3.7 now uses local PostgreSQL OHLC instead of
+    Twelve Data / external candle cache.
+
+    This adapter preserves the old scanner interface.
+    """
+
+    normalized_symbol = (
+        _normalize_symbol(
+            symbol
+        )
+    )
+
+    readiness = (
+        get_metals_candle_readiness(
+            normalized_symbol
+        )
+    )
+
+    return {
+        "symbol":
+            normalized_symbol,
+
+        "ready":
+            readiness.get(
+                "ready",
+                False,
+            ),
+
+        "cached":
+            True,
+
+        "source":
+            "LOCAL_POSTGRES_OHLC",
+
+        "provider":
+            "LOCAL_POSTGRES_OHLC",
+
+        "timeframes":
+            readiness.get(
+                "timeframes",
+                {},
+            ),
+
+        "external_api":
+            False,
+
+        "twelve_data":
+            False,
+
+        "paid_api_required":
+            False,
+    }
+
