@@ -1,8 +1,9 @@
 """
 metals_scanner.py
 
-PRO AI QUANT TERMINAL V3.5
-Gold / Silver Multi-Timeframe Scanner
+PRO AI QUANT TERMINAL V3.7
+
+Gold / Silver Multi-Timeframe Safety Scanner
 
 Supported markets:
     XAUUSD
@@ -21,10 +22,14 @@ Indicators:
     Momentum
     Multi-Timeframe confirmation
 
-Outputs:
-    BUY
-    SELL
-    NO TRADE
+Safety:
+- Fresh live quote required
+- Stale quotes cannot approve trades
+- Fresh candle data required
+- Stale candle cache cannot approve trades
+- All 15m / 1h / 4h timeframes must be valid
+- Higher timeframe confirmation required
+- ATR target validation required
 
 IMPORTANT:
     PAPER TRADING ONLY
@@ -38,10 +43,15 @@ import pandas as pd
 
 from metals_candles import (
     get_metals_mtf_candles,
+    metals_candles_cache_status,
 )
 
 from metals_engine import (
     build_metal_snapshot,
+)
+
+from metals_provider import (
+    get_metal_quote,
 )
 
 
@@ -64,9 +74,6 @@ MIN_CANDLES = 60
 
 
 # Entry thresholds.
-# We intentionally require confirmation rather than
-# opening on every weak movement.
-
 MIN_ENTRY_SCORE = 6
 MIN_MTF_CONFIDENCE = 66.0
 
@@ -77,8 +84,6 @@ RSI_OVERBOUGHT = 70.0
 
 
 # ATR-based trade management.
-# Metals should not blindly use Crypto's fixed 2% / 1%.
-
 ATR_SL_MULTIPLIER = {
     "XAUUSD": 1.50,
     "XAGUSD": 1.65,
@@ -90,7 +95,6 @@ ATR_TP_MULTIPLIER = {
 }
 
 
-# Risk used later by the execution layer.
 DEFAULT_METALS_RISK_PCT = 1.0
 
 
@@ -145,6 +149,217 @@ def _empty_timeframe_result(
         "atr_pct": 0.0,
         "momentum_pct": 0.0,
         "reason": reason,
+    }
+
+
+def _no_trade_result(
+    symbol: str,
+    reason: str,
+    market_snapshot: Optional[Dict] = None,
+    quote: Optional[Dict] = None,
+    timeframes: Optional[Dict] = None,
+) -> Dict:
+
+    return {
+        "symbol":
+            symbol,
+
+        "asset_class":
+            "METAL",
+
+        "signal":
+            "NO TRADE",
+
+        "score":
+            0.0,
+
+        "mtf_confidence":
+            0.0,
+
+        "higher_tf_confirmed":
+            False,
+
+        "approved":
+            False,
+
+        "entry_price":
+            0.0,
+
+        "targets":
+            {},
+
+        "risk_pct":
+            DEFAULT_METALS_RISK_PCT,
+
+        "timeframes":
+            timeframes or {},
+
+        "market_snapshot":
+            market_snapshot or {},
+
+        "quote":
+            quote or {},
+
+        "quote_fresh":
+            False,
+
+        "candles_fresh":
+            False,
+
+        "safety_gate":
+            False,
+
+        "reason":
+            reason,
+    }
+
+
+# ============================================================
+# QUOTE SAFETY
+# ============================================================
+
+def _quote_is_safe(
+    quote: Optional[Dict],
+) -> bool:
+
+    if not quote:
+        return False
+
+    last = _safe_float(
+        quote.get(
+            "last"
+        )
+    )
+
+    if last <= 0:
+        return False
+
+    if quote.get(
+        "stale",
+        False,
+    ):
+        return False
+
+    if quote.get(
+        "data_fresh",
+        True,
+    ) is False:
+        return False
+
+    if quote.get(
+        "tradable_data",
+        True,
+    ) is False:
+        return False
+
+    return True
+
+
+# ============================================================
+# CANDLE SAFETY
+# ============================================================
+
+def _expected_candle_cache_keys(
+    symbol: str,
+) -> Dict[str, str]:
+
+    return {
+        "15m":
+            f"{symbol}:15min:200",
+
+        "1h":
+            f"{symbol}:1h:200",
+
+        "4h":
+            f"{symbol}:4h:200",
+    }
+
+
+def _check_candle_freshness(
+    symbol: str,
+) -> Dict:
+
+    status = (
+        metals_candles_cache_status()
+    )
+
+    expected = (
+        _expected_candle_cache_keys(
+            symbol
+        )
+    )
+
+    result = {}
+
+    all_fresh = True
+
+    for timeframe, key in (
+        expected.items()
+    ):
+
+        record = status.get(
+            key
+        )
+
+        if not isinstance(
+            record,
+            dict,
+        ):
+
+            result[
+                timeframe
+            ] = {
+                "fresh":
+                    False,
+
+                "reason":
+                    "No candle cache record",
+            }
+
+            all_fresh = False
+
+            continue
+
+        fresh = bool(
+            record.get(
+                "fresh",
+                False,
+            )
+        )
+
+        result[
+            timeframe
+        ] = {
+            "fresh":
+                fresh,
+
+            "age_seconds":
+                record.get(
+                    "age_seconds"
+                ),
+
+            "stale_usable":
+                record.get(
+                    "stale_usable",
+                    False,
+                ),
+        }
+
+        if not fresh:
+            all_fresh = False
+
+    return {
+        "all_fresh":
+            all_fresh,
+
+        "timeframes":
+            result,
+
+        "provider_cooldown_seconds":
+            status.get(
+                "provider_cooldown_seconds",
+                0,
+            ),
     }
 
 
@@ -214,7 +429,6 @@ def calculate_rsi(
         )
     )
 
-    # Strong uninterrupted moves can create 0 loss/gain.
     rsi = rsi.fillna(
         50.0
     )
@@ -665,14 +879,12 @@ def analyse_timeframe(
 
     elif rsi < RSI_OVERSOLD:
 
-        # Oversold alone is NOT automatically BUY.
         reasons.append(
             "RSI oversold"
         )
 
     elif rsi > RSI_OVERBOUGHT:
 
-        # Overbought alone is NOT automatically SELL.
         reasons.append(
             "RSI overbought"
         )
@@ -830,6 +1042,12 @@ def calculate_weighted_score(
     for timeframe, analysis in (
         analyses.items()
     ):
+
+        if not analysis.get(
+            "valid",
+            False,
+        ):
+            continue
 
         weight = TIMEFRAME_WEIGHT.get(
             timeframe,
@@ -1141,6 +1359,41 @@ def scan_metal(
         .strip()
     )
 
+    # --------------------------------------------------------
+    # SAFETY GATE 1:
+    # DIRECT PROVIDER QUOTE
+    # --------------------------------------------------------
+
+    quote = (
+        get_metal_quote(
+            symbol
+        )
+    )
+
+    if quote is None:
+
+        return _no_trade_result(
+            symbol,
+            "Live metals quote unavailable",
+        )
+
+    if not _quote_is_safe(
+        quote
+    ):
+
+        return _no_trade_result(
+            symbol,
+            (
+                "Metal quote is stale or "
+                "not safe for trading"
+            ),
+            quote=quote,
+        )
+
+    # --------------------------------------------------------
+    # BUILD MARKET SNAPSHOT
+    # --------------------------------------------------------
+
     market_snapshot = (
         build_metal_snapshot(
             symbol
@@ -1151,23 +1404,15 @@ def scan_metal(
         "status"
     ) != "LIVE":
 
-        return {
-            "symbol": symbol,
-            "signal": "NO TRADE",
-            "score": 0.0,
-            "mtf_confidence": 0.0,
-            "approved": False,
-            "reason": (
-                "Live metals quote unavailable"
-            ),
-            "timeframes": {},
-            "targets": {},
-            "market_snapshot":
-                market_snapshot,
-        }
+        return _no_trade_result(
+            symbol,
+            "Live metals market snapshot unavailable",
+            market_snapshot=market_snapshot,
+            quote=quote,
+        )
 
     # --------------------------------------------------------
-    # SPREAD / QUALITY FILTER
+    # SPREAD / MARKET QUALITY
     # --------------------------------------------------------
 
     if not market_snapshot.get(
@@ -1175,20 +1420,16 @@ def scan_metal(
         True,
     ):
 
-        return {
-            "symbol": symbol,
-            "signal": "NO TRADE",
-            "score": 0.0,
-            "mtf_confidence": 0.0,
-            "approved": False,
-            "reason": (
-                "Metal spread too wide"
-            ),
-            "timeframes": {},
-            "targets": {},
-            "market_snapshot":
-                market_snapshot,
-        }
+        return _no_trade_result(
+            symbol,
+            "Metal spread too wide",
+            market_snapshot=market_snapshot,
+            quote=quote,
+        )
+
+    # --------------------------------------------------------
+    # LOAD MTF CANDLES
+    # --------------------------------------------------------
 
     mtf_data = (
         get_metals_mtf_candles(
@@ -1213,6 +1454,105 @@ def scan_metal(
             timeframe,
         )
 
+    # --------------------------------------------------------
+    # SAFETY GATE 2:
+    # EVERY TIMEFRAME MUST BE VALID
+    # --------------------------------------------------------
+
+    all_timeframes_valid = all(
+        analyses.get(
+            timeframe,
+            {}
+        ).get(
+            "valid",
+            False,
+        )
+        for timeframe in TIMEFRAMES
+    )
+
+    if not all_timeframes_valid:
+
+        invalid = [
+            timeframe
+            for timeframe in TIMEFRAMES
+            if not analyses.get(
+                timeframe,
+                {}
+            ).get(
+                "valid",
+                False,
+            )
+        ]
+
+        return _no_trade_result(
+            symbol,
+            (
+                "Invalid metals timeframe data: "
+                + ", ".join(
+                    invalid
+                )
+            ),
+            market_snapshot=market_snapshot,
+            quote=quote,
+            timeframes=analyses,
+        )
+
+    # --------------------------------------------------------
+    # SAFETY GATE 3:
+    # CANDLES MUST BE FRESH
+    # --------------------------------------------------------
+
+    candle_quality = (
+        _check_candle_freshness(
+            symbol
+        )
+    )
+
+    candles_fresh = bool(
+        candle_quality.get(
+            "all_fresh",
+            False,
+        )
+    )
+
+    if not candles_fresh:
+
+        stale_frames = [
+            timeframe
+            for timeframe, info
+            in candle_quality.get(
+                "timeframes",
+                {}
+            ).items()
+            if not info.get(
+                "fresh",
+                False,
+            )
+        ]
+
+        result = _no_trade_result(
+            symbol,
+            (
+                "Metals candle data stale/unavailable: "
+                + ", ".join(
+                    stale_frames
+                )
+            ),
+            market_snapshot=market_snapshot,
+            quote=quote,
+            timeframes=analyses,
+        )
+
+        result[
+            "candle_quality"
+        ] = candle_quality
+
+        return result
+
+    # --------------------------------------------------------
+    # WEIGHTED SCORE
+    # --------------------------------------------------------
+
     weighted_score = (
         calculate_weighted_score(
             analyses
@@ -1220,7 +1560,7 @@ def scan_metal(
     )
 
     # --------------------------------------------------------
-    # DIRECTION DECISION
+    # DIRECTION
     # --------------------------------------------------------
 
     if weighted_score >= MIN_ENTRY_SCORE:
@@ -1245,7 +1585,7 @@ def scan_metal(
     )
 
     # --------------------------------------------------------
-    # STRONGER 1H + 4H REQUIREMENT
+    # HIGHER TIMEFRAME CONFIRMATION
     # --------------------------------------------------------
 
     one_hour = analyses.get(
@@ -1285,7 +1625,7 @@ def scan_metal(
         )
 
     # --------------------------------------------------------
-    # FINAL APPROVAL
+    # FINAL SAFETY APPROVAL
     # --------------------------------------------------------
 
     approved = (
@@ -1297,10 +1637,15 @@ def scan_metal(
         and mtf_confidence
         >= MIN_MTF_CONFIDENCE
         and higher_tf_confirmed
+        and all_timeframes_valid
+        and candles_fresh
+        and _quote_is_safe(
+            quote
+        )
     )
 
     entry_price = _safe_float(
-        market_snapshot.get(
+        quote.get(
             "last"
         )
     )
@@ -1336,6 +1681,10 @@ def scan_metal(
 
             approved = False
 
+    # --------------------------------------------------------
+    # REASON
+    # --------------------------------------------------------
+
     reasons = []
 
     reasons.append(
@@ -1370,6 +1719,26 @@ def scan_metal(
 
         reasons.append(
             f"Market quality {quality}"
+        )
+
+    if candles_fresh:
+
+        reasons.append(
+            "Candles fresh"
+        )
+
+    if _quote_is_safe(
+        quote
+    ):
+
+        reasons.append(
+            "Quote fresh"
+        )
+
+    if signal == "NO TRADE":
+
+        reasons.append(
+            "Entry threshold not reached"
         )
 
     return {
@@ -1409,6 +1778,30 @@ def scan_metal(
         "market_snapshot":
             market_snapshot,
 
+        "quote":
+            quote,
+
+        "quote_fresh":
+            True,
+
+        "candles_fresh":
+            candles_fresh,
+
+        "all_timeframes_valid":
+            all_timeframes_valid,
+
+        "candle_quality":
+            candle_quality,
+
+        "safety_gate":
+            (
+                candles_fresh
+                and all_timeframes_valid
+                and _quote_is_safe(
+                    quote
+                )
+            ),
+
         "reason":
             ", ".join(
                 reasons
@@ -1434,34 +1827,10 @@ def scan_metals() -> List[Dict]:
 
         except Exception as error:
 
-            result = {
-                "symbol":
-                    symbol,
-
-                "asset_class":
-                    "METAL",
-
-                "signal":
-                    "NO TRADE",
-
-                "score":
-                    0.0,
-
-                "mtf_confidence":
-                    0.0,
-
-                "approved":
-                    False,
-
-                "reason":
-                    f"Scanner error: {error}",
-
-                "timeframes":
-                    {},
-
-                "targets":
-                    {},
-            }
+            result = _no_trade_result(
+                symbol,
+                f"Scanner error: {error}",
+            )
 
         results.append(
             result
@@ -1485,9 +1854,16 @@ def get_best_metals_setup(
     approved = [
         item
         for item in results
-        if item.get(
-            "approved",
-            False,
+        if (
+            item.get(
+                "approved",
+                False,
+            )
+            and
+            item.get(
+                "safety_gate",
+                False,
+            )
         )
     ]
 
@@ -1571,9 +1947,16 @@ def metals_scanner_summary(
             sum(
                 1
                 for item in results
-                if item.get(
-                    "approved",
-                    False,
+                if (
+                    item.get(
+                        "approved",
+                        False,
+                    )
+                    and
+                    item.get(
+                        "safety_gate",
+                        False,
+                    )
                 )
             ),
 
@@ -1613,12 +1996,21 @@ def metals_scanner_health() -> Dict:
             )
         )
 
+        safe_markets = sum(
+            1
+            for item in results
+            if item.get(
+                "safety_gate",
+                False,
+            )
+        )
+
         return {
             "ok":
                 valid_markets > 0,
 
             "engine":
-                "V3.5 Metals Scanner",
+                "V3.7 Metals Safety Scanner",
 
             "markets":
                 len(
@@ -1627,6 +2019,9 @@ def metals_scanner_health() -> Dict:
 
             "valid_markets":
                 valid_markets,
+
+            "safe_markets":
+                safe_markets,
 
             "paper_execution":
                 False,
@@ -1642,7 +2037,7 @@ def metals_scanner_health() -> Dict:
                 False,
 
             "engine":
-                "V3.5 Metals Scanner",
+                "V3.7 Metals Safety Scanner",
 
             "reason":
                 str(
