@@ -2077,3 +2077,132 @@ def live_engine():
 # ============================================================
 
 live_engine()
+
+
+# ============================================================
+# V3.8 METALS HISTORICAL BOOTSTRAP CONTROL
+# ============================================================
+
+try:
+    from metals_bootstrap import (
+        run_bootstrap_cycle,
+        bootstrap_status,
+        metals_bootstrap_health,
+    )
+
+    st.markdown("---")
+    st.subheader("🧱 Metals Historical Bootstrap")
+
+    bootstrap_health = metals_bootstrap_health()
+    bootstrap_state = bootstrap_status()
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric(
+            "Bootstrap Engine",
+            "ONLINE"
+            if bootstrap_health.get("ok")
+            else "ERROR",
+        )
+
+    with col2:
+        st.metric(
+            "Requests Used / Hour",
+            bootstrap_state.get(
+                "requests_used_last_hour",
+                0,
+            ),
+        )
+
+    with col3:
+        st.metric(
+            "Hourly Safety Budget",
+            bootstrap_state.get(
+                "hourly_budget",
+                0,
+            ),
+        )
+
+    markets = bootstrap_state.get(
+        "markets",
+        {},
+    )
+
+    for symbol in (
+        "XAUUSD",
+        "XAGUSD",
+    ):
+
+        st.markdown(f"### {symbol}")
+
+        tf_data = markets.get(
+            symbol,
+            {},
+        )
+
+        c1, c2, c3 = st.columns(3)
+
+        for col, timeframe in zip(
+            (c1, c2, c3),
+            ("15m", "1h", "4h"),
+        ):
+            info = tf_data.get(
+                timeframe,
+                {},
+            )
+
+            with col:
+                st.metric(
+                    timeframe,
+                    (
+                        f"{info.get('candles', 0)}"
+                        f"/{info.get('target', 60)}"
+                    ),
+                )
+
+    if bootstrap_state.get(
+        "ready",
+        False,
+    ):
+        st.success(
+            "Metals historical bootstrap is complete."
+        )
+
+    else:
+        st.info(
+            "Historical candles are still building. "
+            "Run one safe bootstrap cycle at a time."
+        )
+
+        if st.button(
+            "🚀 Run Safe Metals Bootstrap",
+            use_container_width=True,
+        ):
+            with st.spinner(
+                "Fetching real historical Gold/Silver OHLC..."
+            ):
+                result = run_bootstrap_cycle(
+                    max_requests=4
+                )
+
+            if result.get("ok"):
+                st.success(
+                    "Bootstrap cycle completed."
+                )
+            else:
+                st.error(
+                    result.get(
+                        "reason",
+                        "Bootstrap cycle failed.",
+                    )
+                )
+
+            st.rerun()
+
+except Exception as bootstrap_ui_error:
+
+    st.warning(
+        "Metals bootstrap control unavailable: "
+        f"{bootstrap_ui_error}"
+    )
