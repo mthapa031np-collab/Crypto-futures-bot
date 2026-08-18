@@ -1,54 +1,39 @@
 """
 metals_bootstrap.py
 
-PRO AI QUANT TERMINAL V4.3
-HYBRID FREE-TIER METALS HISTORICAL BOOTSTRAP ENGINE
+PRO AI QUANT TERMINAL V4.3.1
+SCHEMA-SAFE HYBRID METALS HISTORICAL BOOTSTRAP ENGINE
 
-IMPORTANT DESIGN
-----------------
-Initial warm-up:
-    XAUUSD + XAGUSD
-        ×
-    15m + 1h + 4h
-        ×
-    60 valid historical OHLC candles
-
-Why?
-----
-Gold-API /ohlc returns ONE OHLC segment per request.
-Bootstrapping 4h from 15m alone would require far more
-historical API requests.
-
-Therefore:
-
-INITIAL BOOTSTRAP
+Architecture
+------------
+INITIAL WARM-UP:
     Gold-API OHLC
         ↓
-    Real 15m / 1h / 4h seed candles
+    Direct historical:
+        XAUUSD / XAGUSD
+        15m / 1h / 4h
         ↓
     PostgreSQL
 
-AFTER WARM-UP
-    Gold-API realtime quotes
+LONG TERM:
+    Gold-API realtime
         ↓
-    Local canonical 15m
+    Canonical local 15m
         ↓
     Local 1h / 4h resampling
 
-This keeps initial warm-up efficient while future operation
-becomes increasingly independent of historical API requests.
-
-Safety
-------
-- Free-tier aware
-- Internal ceiling: 8 historical calls/hour
-- Persistent progress
-- Restart-safe cursors
-- Weekend / closed-session skip protection
-- Duplicate-safe
-- Never creates synthetic historical prices
+V4.3.1 upgrade
+--------------
+- Automatic PostgreSQL schema migration
+- Preserves existing historical data
+- Fixes legacy metals_bootstrap_requests tables
+- Restart-safe cursor
+- Duplicate-safe candle inserts
+- Historical request accounting
+- Provider/local rate-limit safety
+- Weekend / no-data interval skipping
 - PAPER ONLY
-- NO REAL ORDERS
+- REAL ORDERS DISABLED
 """
 
 from __future__ import annotations
@@ -82,15 +67,11 @@ GOLD_API_KEY = os.environ.get(
 # PROVIDER
 # ============================================================
 
-GOLD_API_BASE_URL = (
-    "https://api.gold-api.com"
-)
+GOLD_API_BASE_URL = "https://api.gold-api.com"
 
 REQUEST_TIMEOUT = 15
 
-
-# Provider free tier = 10 history/OHLC calls per hour.
-# Keep a safety margin.
+# Keep below provider ceiling for safety.
 INTERNAL_REQUEST_LIMIT_PER_HOUR = 8
 
 
@@ -103,13 +84,11 @@ SUPPORTED_SYMBOLS = {
     "XAGUSD": "XAG",
 }
 
-
 TIMEFRAME_MINUTES = {
     "15m": 15,
     "1h": 60,
     "4h": 240,
 }
-
 
 TARGET_CANDLES = {
     "15m": 60,
@@ -123,25 +102,16 @@ TARGET_CANDLES = {
 # ============================================================
 
 def _utc_now() -> datetime:
-
-    return datetime.now(
-        timezone.utc
-    )
+    return datetime.now(timezone.utc)
 
 
-def _safe_float(
-    value,
-    default=None,
-):
+def _safe_float(value, default=None):
 
     try:
-
         if value is None:
             return default
 
-        number = float(
-            value
-        )
+        number = float(value)
 
         if number != number:
             return default
@@ -151,17 +121,11 @@ def _safe_float(
 
         return number
 
-    except (
-        TypeError,
-        ValueError,
-    ):
-
+    except (TypeError, ValueError):
         return default
 
 
-def _normalize_symbol(
-    symbol: str,
-) -> str:
+def _normalize_symbol(symbol: str) -> str:
 
     normalized = (
         str(symbol)
@@ -173,7 +137,6 @@ def _normalize_symbol(
     )
 
     if normalized not in SUPPORTED_SYMBOLS:
-
         raise ValueError(
             f"Unsupported metals symbol: {symbol}"
         )
@@ -181,9 +144,7 @@ def _normalize_symbol(
     return normalized
 
 
-def _normalize_timeframe(
-    timeframe: str,
-) -> str:
+def _normalize_timeframe(timeframe: str) -> str:
 
     value = (
         str(timeframe)
@@ -205,12 +166,9 @@ def _normalize_timeframe(
         "240min": "4h",
     }
 
-    normalized = aliases.get(
-        value
-    )
+    normalized = aliases.get(value)
 
     if normalized not in TIMEFRAME_MINUTES:
-
         raise ValueError(
             f"Unsupported metals timeframe: {timeframe}"
         )
@@ -227,9 +185,7 @@ def _timeframe_duration(
     )
 
     return timedelta(
-        minutes=TIMEFRAME_MINUTES[
-            timeframe
-        ]
+        minutes=TIMEFRAME_MINUTES[timeframe]
     )
 
 
@@ -280,7 +236,6 @@ def _latest_closed_boundary(
 def _connect():
 
     if not DATABASE_URL:
-
         raise RuntimeError(
             "DATABASE_URL is not configured."
         )
@@ -293,45 +248,119 @@ def _connect():
 
 
 # ============================================================
-# TABLE SETUP
+# SCHEMA MIGRATION
 # ============================================================
 
 def ensure_bootstrap_tables():
+    """
+    Create missing tables AND safely upgrade legacy tables.
+
+    Important:
+    CREATE TABLE IF NOT EXISTS does NOT add new columns to an
+    already-existing PostgreSQL table.
+
+    Therefore V4.3.1 performs explicit idempotent migrations.
+    Existing historical data is preserved.
+    """
 
     with _connect() as conn:
 
         with conn.cursor() as cur:
 
-            # ------------------------------------------------
-            # CANDLES
-            # ------------------------------------------------
+            # =================================================
+            # METALS SEED CANDLES
+            # =================================================
 
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS metals_seed_candles (
-                    id BIGSERIAL PRIMARY KEY,
+                    id BIGSERIAL PRIMARY KEY
+                )
+                """
+            )
 
-                    symbol TEXT NOT NULL,
-                    timeframe TEXT NOT NULL,
+            cur.execute(
+                """
+                ALTER TABLE metals_seed_candles
+                ADD COLUMN IF NOT EXISTS symbol TEXT
+                """
+            )
 
-                    candle_start TIMESTAMPTZ NOT NULL,
-                    candle_end TIMESTAMPTZ NOT NULL,
+            cur.execute(
+                """
+                ALTER TABLE metals_seed_candles
+                ADD COLUMN IF NOT EXISTS timeframe TEXT
+                """
+            )
 
-                    open DOUBLE PRECISION NOT NULL,
-                    high DOUBLE PRECISION NOT NULL,
-                    low DOUBLE PRECISION NOT NULL,
-                    close DOUBLE PRECISION NOT NULL,
+            cur.execute(
+                """
+                ALTER TABLE metals_seed_candles
+                ADD COLUMN IF NOT EXISTS candle_start TIMESTAMPTZ
+                """
+            )
 
-                    provider TEXT NOT NULL,
+            cur.execute(
+                """
+                ALTER TABLE metals_seed_candles
+                ADD COLUMN IF NOT EXISTS candle_end TIMESTAMPTZ
+                """
+            )
 
-                    created_at TIMESTAMPTZ NOT NULL
-                        DEFAULT NOW(),
+            cur.execute(
+                """
+                ALTER TABLE metals_seed_candles
+                ADD COLUMN IF NOT EXISTS open DOUBLE PRECISION
+                """
+            )
 
-                    UNIQUE (
-                        symbol,
-                        timeframe,
-                        candle_start
-                    )
+            cur.execute(
+                """
+                ALTER TABLE metals_seed_candles
+                ADD COLUMN IF NOT EXISTS high DOUBLE PRECISION
+                """
+            )
+
+            cur.execute(
+                """
+                ALTER TABLE metals_seed_candles
+                ADD COLUMN IF NOT EXISTS low DOUBLE PRECISION
+                """
+            )
+
+            cur.execute(
+                """
+                ALTER TABLE metals_seed_candles
+                ADD COLUMN IF NOT EXISTS close DOUBLE PRECISION
+                """
+            )
+
+            cur.execute(
+                """
+                ALTER TABLE metals_seed_candles
+                ADD COLUMN IF NOT EXISTS provider TEXT
+                DEFAULT 'Gold-API'
+                """
+            )
+
+            cur.execute(
+                """
+                ALTER TABLE metals_seed_candles
+                ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ
+                DEFAULT NOW()
+                """
+            )
+
+            # Unique index guarantees ON CONFLICT compatibility.
+            cur.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                uq_metals_seed_symbol_tf_start
+
+                ON metals_seed_candles (
+                    symbol,
+                    timeframe,
+                    candle_start
                 )
                 """
             )
@@ -349,27 +378,54 @@ def ensure_bootstrap_tables():
                 """
             )
 
-            # ------------------------------------------------
-            # REQUEST HISTORY
-            # ------------------------------------------------
+            # =================================================
+            # BOOTSTRAP REQUEST HISTORY
+            # =================================================
 
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS
                 metals_bootstrap_requests (
-                    id BIGSERIAL PRIMARY KEY,
-
-                    requested_at TIMESTAMPTZ NOT NULL
-                        DEFAULT NOW(),
-
-                    symbol TEXT,
-                    timeframe TEXT,
-
-                    success BOOLEAN NOT NULL
-                        DEFAULT FALSE,
-
-                    result_type TEXT
+                    id BIGSERIAL PRIMARY KEY
                 )
+                """
+            )
+
+            cur.execute(
+                """
+                ALTER TABLE metals_bootstrap_requests
+                ADD COLUMN IF NOT EXISTS requested_at TIMESTAMPTZ
+                DEFAULT NOW()
+                """
+            )
+
+            cur.execute(
+                """
+                ALTER TABLE metals_bootstrap_requests
+                ADD COLUMN IF NOT EXISTS symbol TEXT
+                """
+            )
+
+            cur.execute(
+                """
+                ALTER TABLE metals_bootstrap_requests
+                ADD COLUMN IF NOT EXISTS timeframe TEXT
+                """
+            )
+
+            cur.execute(
+                """
+                ALTER TABLE metals_bootstrap_requests
+                ADD COLUMN IF NOT EXISTS success BOOLEAN
+                DEFAULT FALSE
+                """
+            )
+
+            # THIS FIXES THE ERROR CURRENTLY SEEN ON RENDER.
+            cur.execute(
+                """
+                ALTER TABLE metals_bootstrap_requests
+                ADD COLUMN IF NOT EXISTS result_type TEXT
                 """
             )
 
@@ -384,12 +440,9 @@ def ensure_bootstrap_tables():
                 """
             )
 
-            # ------------------------------------------------
-            # PERSISTENT BACKFILL CURSOR
-            #
-            # Crucial for restart safety and weekend/no-data
-            # intervals.
-            # ------------------------------------------------
+            # =================================================
+            # PERSISTENT BOOTSTRAP CURSOR
+            # =================================================
 
             cur.execute(
                 """
@@ -397,9 +450,7 @@ def ensure_bootstrap_tables():
                 metals_bootstrap_cursor (
                     symbol TEXT NOT NULL,
                     timeframe TEXT NOT NULL,
-
                     next_end TIMESTAMPTZ NOT NULL,
-
                     updated_at TIMESTAMPTZ NOT NULL
                         DEFAULT NOW(),
 
@@ -408,6 +459,22 @@ def ensure_bootstrap_tables():
                         timeframe
                     )
                 )
+                """
+            )
+
+            # Defensive migrations for future/legacy schema.
+            cur.execute(
+                """
+                ALTER TABLE metals_bootstrap_cursor
+                ADD COLUMN IF NOT EXISTS next_end TIMESTAMPTZ
+                """
+            )
+
+            cur.execute(
+                """
+                ALTER TABLE metals_bootstrap_cursor
+                ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ
+                DEFAULT NOW()
                 """
             )
 
@@ -424,9 +491,7 @@ def requests_used_last_hour() -> int:
 
     cutoff = (
         _utc_now()
-        - timedelta(
-            hours=1
-        )
+        - timedelta(hours=1)
     )
 
     with _connect() as conn:
@@ -537,6 +602,11 @@ def stored_seed_count(
 
                 WHERE symbol = %s
                   AND timeframe = %s
+                  AND candle_start IS NOT NULL
+                  AND open IS NOT NULL
+                  AND high IS NOT NULL
+                  AND low IS NOT NULL
+                  AND close IS NOT NULL
                 """,
                 (
                     symbol,
@@ -574,6 +644,7 @@ def _oldest_seed_start(
 
                 WHERE symbol = %s
                   AND timeframe = %s
+                  AND candle_start IS NOT NULL
                 """,
                 (
                     symbol,
@@ -584,7 +655,6 @@ def _oldest_seed_start(
             row = cur.fetchone()
 
     if not row:
-
         return None
 
     return row.get(
@@ -632,16 +702,15 @@ def _get_cursor(
 
             row = cur.fetchone()
 
-    if row:
-
+    if (
+        row
+        and row.get("next_end")
+    ):
         return row[
             "next_end"
         ]
 
-    # ---------------------------------------------
-    # Preserve old bootstrap progress.
-    # ---------------------------------------------
-
+    # Preserve existing history.
     oldest = _oldest_seed_start(
         symbol,
         timeframe,
@@ -675,6 +744,14 @@ def _set_cursor(
 ):
 
     ensure_bootstrap_tables()
+
+    symbol = _normalize_symbol(
+        symbol
+    )
+
+    timeframe = _normalize_timeframe(
+        timeframe
+    )
 
     with _connect() as conn:
 
@@ -719,16 +796,13 @@ def _set_cursor(
 
 
 # ============================================================
-# NEXT SEGMENT
+# NEXT HISTORICAL SEGMENT
 # ============================================================
 
 def next_bootstrap_range(
     symbol: str,
     timeframe: str,
-) -> Tuple[
-    datetime,
-    datetime,
-]:
+) -> Tuple[datetime, datetime]:
 
     symbol = _normalize_symbol(
         symbol
@@ -743,10 +817,8 @@ def next_bootstrap_range(
         timeframe,
     )
 
-    duration = (
-        _timeframe_duration(
-            timeframe
-        )
+    duration = _timeframe_duration(
+        timeframe
     )
 
     start = (
@@ -754,14 +826,11 @@ def next_bootstrap_range(
         - duration
     )
 
-    return (
-        start,
-        end,
-    )
+    return start, end
 
 
 # ============================================================
-# STORE REAL HISTORICAL CANDLE
+# STORE HISTORICAL CANDLE
 # ============================================================
 
 def store_seed_candle(
@@ -805,7 +874,6 @@ def store_seed_candle(
         low_price,
         close_price,
     ):
-
         return False
 
     if high_price < low_price:
@@ -840,7 +908,8 @@ def store_seed_candle(
                     high,
                     low,
                     close,
-                    provider
+                    provider,
+                    created_at
                 )
 
                 VALUES (
@@ -852,7 +921,8 @@ def store_seed_candle(
                     %s,
                     %s,
                     %s,
-                    %s
+                    %s,
+                    NOW()
                 )
 
                 ON CONFLICT (
@@ -877,8 +947,7 @@ def store_seed_candle(
             )
 
             inserted = (
-                cur.rowcount
-                > 0
+                cur.rowcount > 0
             )
 
         conn.commit()
@@ -898,9 +967,7 @@ def fetch_gold_api_ohlc(
     if not GOLD_API_KEY:
 
         return {
-            "ok":
-                False,
-
+            "ok": False,
             "reason":
                 "GOLD_API_KEY is not configured.",
         }
@@ -924,18 +991,10 @@ def fetch_gold_api_ohlc(
     ):
 
         return {
-            "ok":
-                True,
-
-            "complete":
-                True,
-
-            "symbol":
-                symbol,
-
-            "timeframe":
-                timeframe,
-
+            "ok": True,
+            "complete": True,
+            "symbol": symbol,
+            "timeframe": timeframe,
             "reason":
                 "Target already reached.",
         }
@@ -943,12 +1002,8 @@ def fetch_gold_api_ohlc(
     if not historical_request_allowed():
 
         return {
-            "ok":
-                False,
-
-            "rate_limited_locally":
-                True,
-
+            "ok": False,
+            "rate_limited_locally": True,
             "reason":
                 (
                     "Internal hourly historical "
@@ -992,7 +1047,7 @@ def fetch_gold_api_ohlc(
             GOLD_API_KEY,
 
         "User-Agent":
-            "pro-ai-quant-terminal-v4.3",
+            "pro-ai-quant-terminal-v4.3.1",
     }
 
     provider_request_sent = False
@@ -1008,10 +1063,6 @@ def fetch_gold_api_ohlc(
             timeout=REQUEST_TIMEOUT,
         )
 
-        # ---------------------------------------------
-        # RATE LIMIT
-        # ---------------------------------------------
-
         if response.status_code == 429:
 
             _record_request(
@@ -1022,19 +1073,11 @@ def fetch_gold_api_ohlc(
             )
 
             return {
-                "ok":
-                    False,
-
-                "provider_rate_limited":
-                    True,
-
+                "ok": False,
+                "provider_rate_limited": True,
                 "reason":
                     "Gold-API rate limit reached.",
             }
-
-        # ---------------------------------------------
-        # HTTP FAILURE
-        # ---------------------------------------------
 
         if not response.ok:
 
@@ -1042,21 +1085,27 @@ def fetch_gold_api_ohlc(
                 symbol,
                 timeframe,
                 False,
-                f"HTTP_{response.status_code}",
+                (
+                    f"HTTP_"
+                    f"{response.status_code}"
+                ),
             )
 
             return {
-                "ok":
-                    False,
-
+                "ok": False,
                 "status_code":
                     response.status_code,
-
                 "reason":
                     response.text[:500],
             }
 
-        payload = response.json()
+        try:
+
+            payload = response.json()
+
+        except Exception:
+
+            payload = None
 
         if not isinstance(
             payload,
@@ -1070,9 +1119,6 @@ def fetch_gold_api_ohlc(
                 "INVALID_JSON",
             )
 
-            # Valid provider response path but no usable
-            # OHLC. Move backward so worker cannot become
-            # permanently stuck on one interval.
             _set_cursor(
                 symbol,
                 timeframe,
@@ -1080,43 +1126,27 @@ def fetch_gold_api_ohlc(
             )
 
             return {
-                "ok":
-                    False,
-
-                "skipped_interval":
-                    True,
-
+                "ok": False,
+                "skipped_interval": True,
                 "reason":
                     "Invalid OHLC response.",
             }
 
         open_price = _safe_float(
-            payload.get(
-                "open"
-            )
+            payload.get("open")
         )
 
         high_price = _safe_float(
-            payload.get(
-                "high"
-            )
+            payload.get("high")
         )
 
         low_price = _safe_float(
-            payload.get(
-                "low"
-            )
+            payload.get("low")
         )
 
         close_price = _safe_float(
-            payload.get(
-                "close"
-            )
+            payload.get("close")
         )
-
-        # ---------------------------------------------
-        # CLOSED MARKET / NO USABLE DATA
-        # ---------------------------------------------
 
         if None in (
             open_price,
@@ -1132,8 +1162,8 @@ def fetch_gold_api_ohlc(
                 "NO_USABLE_OHLC",
             )
 
-            # Skip this real calendar segment.
-            # Important for weekends / closures.
+            # Move backward through closed-market
+            # periods instead of getting permanently stuck.
             _set_cursor(
                 symbol,
                 timeframe,
@@ -1141,24 +1171,14 @@ def fetch_gold_api_ohlc(
             )
 
             return {
-                "ok":
-                    False,
-
-                "skipped_interval":
-                    True,
-
-                "symbol":
-                    symbol,
-
-                "timeframe":
-                    timeframe,
-
+                "ok": False,
+                "skipped_interval": True,
+                "symbol": symbol,
+                "timeframe": timeframe,
                 "start":
                     start.isoformat(),
-
                 "end":
                     end.isoformat(),
-
                 "reason":
                     "No usable OHLC for segment.",
             }
@@ -1174,8 +1194,7 @@ def fetch_gold_api_ohlc(
             close_price=close_price,
         )
 
-        # Always advance after a valid provider segment,
-        # including duplicate data.
+        # Always progress cursor after valid response.
         _set_cursor(
             symbol,
             timeframe,
@@ -1194,8 +1213,7 @@ def fetch_gold_api_ohlc(
         )
 
         return {
-            "ok":
-                True,
+            "ok": True,
 
             "symbol":
                 symbol,
@@ -1223,20 +1241,19 @@ def fetch_gold_api_ohlc(
                     timeframe
                 ],
 
-            "ohlc":
-                {
-                    "open":
-                        open_price,
+            "ohlc": {
+                "open":
+                    open_price,
 
-                    "high":
-                        high_price,
+                "high":
+                    high_price,
 
-                    "low":
-                        low_price,
+                "low":
+                    low_price,
 
-                    "close":
-                        close_price,
-                },
+                "close":
+                    close_price,
+            },
         }
 
     except requests.Timeout:
@@ -1251,9 +1268,7 @@ def fetch_gold_api_ohlc(
             )
 
         return {
-            "ok":
-                False,
-
+            "ok": False,
             "reason":
                 "Gold-API request timed out.",
         }
@@ -1262,17 +1277,20 @@ def fetch_gold_api_ohlc(
 
         if provider_request_sent:
 
-            _record_request(
-                symbol,
-                timeframe,
-                False,
-                "EXCEPTION",
-            )
+            try:
+
+                _record_request(
+                    symbol,
+                    timeframe,
+                    False,
+                    "EXCEPTION",
+                )
+
+            except Exception:
+                pass
 
         return {
-            "ok":
-                False,
-
+            "ok": False,
             "reason":
                 str(error),
         }
@@ -1286,8 +1304,6 @@ def _bootstrap_candidates() -> List[Dict]:
 
     candidates = []
 
-    # Higher timeframe gets a small tie-break advantage,
-    # but completion percentage is always primary.
     timeframe_priority = {
         "4h": 0,
         "1h": 1,
@@ -1320,7 +1336,6 @@ def _bootstrap_candidates() -> List[Dict]:
             ]
 
             if count >= target:
-
                 continue
 
             completion = (
@@ -1360,17 +1375,9 @@ def _bootstrap_candidates() -> List[Dict]:
 
     candidates.sort(
         key=lambda item: (
-            item[
-                "completion"
-            ],
-
-            item[
-                "timeframe_priority"
-            ],
-
-            item[
-                "symbol_priority"
-            ],
+            item["completion"],
+            item["timeframe_priority"],
+            item["symbol_priority"],
         )
     )
 
@@ -1388,7 +1395,6 @@ def run_bootstrap_cycle(
     ensure_bootstrap_tables()
 
     try:
-
         max_requests = int(
             max_requests
         )
@@ -1397,7 +1403,6 @@ def run_bootstrap_cycle(
         TypeError,
         ValueError,
     ):
-
         max_requests = 2
 
     max_requests = max(
@@ -1428,14 +1433,11 @@ def run_bootstrap_cycle(
     if request_budget <= 0:
 
         return {
-            "ok":
-                True,
+            "ok": True,
 
-            "requests_made":
-                0,
+            "requests_made": 0,
 
-            "budget_exhausted":
-                True,
+            "budget_exhausted": True,
 
             "requests_used_last_hour":
                 requests_before,
@@ -1443,8 +1445,7 @@ def run_bootstrap_cycle(
             "hourly_budget":
                 INTERNAL_REQUEST_LIMIT_PER_HOUR,
 
-            "results":
-                [],
+            "results": [],
 
             "status":
                 bootstrap_status(),
@@ -1462,55 +1463,41 @@ def run_bootstrap_cycle(
         )
 
         if not candidates:
-
             break
 
-        selected = candidates[
-            0
-        ]
+        selected = candidates[0]
 
         result = fetch_gold_api_ohlc(
-            selected[
-                "symbol"
-            ],
-            selected[
-                "timeframe"
-            ],
+            selected["symbol"],
+            selected["timeframe"],
         )
 
         results.append(
             result
         )
 
-        # Only actual provider attempts count here.
         if not result.get(
             "rate_limited_locally",
             False,
         ):
-
             requests_made += 1
 
         if result.get(
             "provider_rate_limited",
             False,
         ):
-
             break
 
         if result.get(
             "rate_limited_locally",
             False,
         ):
-
             break
 
-        time.sleep(
-            1.0
-        )
+        time.sleep(1.0)
 
     return {
-        "ok":
-            True,
+        "ok": True,
 
         "requests_made":
             requests_made,
@@ -1518,7 +1505,8 @@ def run_bootstrap_cycle(
         "budget_exhausted":
             (
                 requests_used_last_hour()
-                >= INTERNAL_REQUEST_LIMIT_PER_HOUR
+                >=
+                INTERNAL_REQUEST_LIMIT_PER_HOUR
             ),
 
         "requests_used_last_hour":
@@ -1604,7 +1592,6 @@ def bootstrap_status() -> Dict:
             }
 
             if not ready:
-
                 all_ready = False
 
     progress_pct = 0.0
@@ -1639,11 +1626,17 @@ def bootstrap_status() -> Dict:
         "provider":
             "Gold-API",
 
+        "engine_version":
+            "V4.3.1",
+
         "bootstrap_mode":
             "DIRECT_INITIAL_15M_1H_4H",
 
         "post_bootstrap_mode":
             "REALTIME_15M_PLUS_LOCAL_RESAMPLE",
+
+        "schema_migration":
+            "AUTOMATIC",
 
         "paper_only":
             True,
@@ -1664,11 +1657,13 @@ def metals_bootstrap_health() -> Dict:
         ensure_bootstrap_tables()
 
         return {
-            "ok":
-                True,
+            "ok": True,
 
             "database":
                 "ONLINE",
+
+            "engine":
+                "V4.3.1 Schema-Safe Metals Bootstrap",
 
             "api_key_configured":
                 bool(
@@ -1677,9 +1672,6 @@ def metals_bootstrap_health() -> Dict:
 
             "provider":
                 "Gold-API",
-
-            "provider_free_limit":
-                "10 History/OHLC requests/hour",
 
             "internal_limit":
                 INTERNAL_REQUEST_LIMIT_PER_HOUR,
@@ -1696,6 +1688,12 @@ def metals_bootstrap_health() -> Dict:
             "closed_session_skip":
                 True,
 
+            "automatic_schema_migration":
+                True,
+
+            "legacy_database_compatible":
+                True,
+
             "status":
                 bootstrap_status(),
 
@@ -1709,8 +1707,10 @@ def metals_bootstrap_health() -> Dict:
     except Exception as error:
 
         return {
-            "ok":
-                False,
+            "ok": False,
+
+            "engine":
+                "V4.3.1 Schema-Safe Metals Bootstrap",
 
             "reason":
                 str(error),
