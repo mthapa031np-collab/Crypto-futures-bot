@@ -2206,3 +2206,498 @@ except Exception as bootstrap_ui_error:
         "Metals bootstrap control unavailable: "
         f"{bootstrap_ui_error}"
     )
+
+
+# ============================================================
+# V3.9 AUTOMATIC METALS BOOTSTRAP RUNTIME
+# Free-Render / quota-safe / restart-safe
+# ============================================================
+
+import os
+import threading
+import time
+
+import psycopg
+
+
+@st.cache_resource
+def start_metals_auto_bootstrap():
+
+    """
+    Starts ONE background bootstrap thread per Streamlit process.
+
+    Safety:
+    - PostgreSQL advisory lock prevents duplicate runtimes
+    - Uses persistent bootstrap progress
+    - Fetches only missing history
+    - Balances XAU/XAG + 15m/1h/4h
+    - Respects historical API quota
+    - Automatically resumes after deploy/restart
+    - Stops requesting when all markets are ready
+    - NEVER enables real trading
+    """
+
+    from metals_bootstrap import (
+        bootstrap_status,
+        fetch_gold_api_ohlc,
+        requests_used_last_hour,
+    )
+
+    DATABASE_URL = os.environ.get(
+        "DATABASE_URL",
+        "",
+    ).strip()
+
+    # SAME lock ID as dedicated worker.
+    # This means a future paid worker and this runtime
+    # can never bootstrap simultaneously.
+    ADVISORY_LOCK_ID = 93739001
+
+    # Gold-API free historical/OHLC plan = 10/hour.
+    # Existing metals_bootstrap.py safety ceiling = 8/hour.
+    INTERNAL_HOURLY_LIMIT = 8
+
+    # One request every 8 minutes.
+    REQUEST_INTERVAL_SECONDS = 480
+
+    # Check again after budget is exhausted.
+    BUDGET_WAIT_SECONDS = 600
+
+    # When bootstrap is complete.
+    READY_SLEEP_SECONDS = 3600
+
+    # Temporary API/database error retry.
+    ERROR_SLEEP_SECONDS = 120
+
+    state = {
+        "started": False,
+        "lock_acquired": False,
+        "last_result": None,
+        "last_error": None,
+    }
+
+    if not DATABASE_URL:
+
+        state["last_error"] = (
+            "DATABASE_URL is not configured."
+        )
+
+        return state
+
+    def log(message):
+
+        print(
+            "[METALS AUTO BOOTSTRAP] "
+            + str(message),
+            flush=True,
+        )
+
+    def select_next_market(status):
+
+        """
+        Select the least-complete timeframe first.
+
+        This avoids the old problem where XAU 4h could consume
+        every request before XAG / 1h / 15m received history.
+        """
+
+        markets = status.get(
+            "markets",
+            {},
+        )
+
+        candidates = []
+
+        timeframe_rank = {
+            "4h": 0,
+            "1h": 1,
+            "15m": 2,
+        }
+
+        symbol_rank = {
+            "XAUUSD": 0,
+            "XAGUSD": 1,
+        }
+
+        for symbol in (
+            "XAUUSD",
+            "XAGUSD",
+        ):
+
+            symbol_data = markets.get(
+                symbol,
+                {},
+            )
+
+            for timeframe in (
+                "4h",
+                "1h",
+                "15m",
+            ):
+
+                info = symbol_data.get(
+                    timeframe,
+                    {},
+                )
+
+                candles = int(
+                    info.get(
+                        "candles",
+                        0,
+                    )
+                    or 0
+                )
+
+                target = int(
+                    info.get(
+                        "target",
+                        60,
+                    )
+                    or 60
+                )
+
+                if candles >= target:
+
+                    continue
+
+                completion_ratio = (
+                    candles / target
+                    if target > 0
+                    else 1.0
+                )
+
+                candidates.append(
+                    (
+                        completion_ratio,
+                        candles,
+                        timeframe_rank[
+                            timeframe
+                        ],
+                        symbol_rank[
+                            symbol
+                        ],
+                        symbol,
+                        timeframe,
+                    )
+                )
+
+        if not candidates:
+
+            return None
+
+        candidates.sort()
+
+        selected = candidates[0]
+
+        return {
+            "symbol":
+                selected[4],
+
+            "timeframe":
+                selected[5],
+        }
+
+    def worker_loop():
+
+        lock_connection = None
+
+        try:
+
+            # ------------------------------------------------
+            # DATABASE SINGLE-RUNTIME LOCK
+            # ------------------------------------------------
+
+            lock_connection = psycopg.connect(
+                DATABASE_URL,
+                autocommit=True,
+                connect_timeout=10,
+            )
+
+            with lock_connection.cursor() as cur:
+
+                cur.execute(
+                    """
+                    SELECT pg_try_advisory_lock(%s)
+                    """,
+                    (
+                        ADVISORY_LOCK_ID,
+                    ),
+                )
+
+                row = cur.fetchone()
+
+            lock_acquired = bool(
+                row
+                and row[0]
+            )
+
+            state[
+                "lock_acquired"
+            ] = lock_acquired
+
+            if not lock_acquired:
+
+                log(
+                    "Another metals bootstrap runtime "
+                    "already owns the lock. "
+                    "This runtime will stay disabled."
+                )
+
+                return
+
+            log(
+                "Automatic bootstrap lock acquired."
+            )
+
+            # ------------------------------------------------
+            # MAIN LOOP
+            # ------------------------------------------------
+
+            while True:
+
+                try:
+
+                    status = (
+                        bootstrap_status()
+                    )
+
+                    # ----------------------------------------
+                    # COMPLETE
+                    # ----------------------------------------
+
+                    if status.get(
+                        "ready",
+                        False,
+                    ):
+
+                        log(
+                            "Historical bootstrap READY. "
+                            "No API request required."
+                        )
+
+                        time.sleep(
+                            READY_SLEEP_SECONDS
+                        )
+
+                        continue
+
+                    # ----------------------------------------
+                    # HOURLY API BUDGET
+                    # ----------------------------------------
+
+                    used = int(
+                        requests_used_last_hour()
+                        or 0
+                    )
+
+                    if (
+                        used
+                        >= INTERNAL_HOURLY_LIMIT
+                    ):
+
+                        log(
+                            "Hourly historical budget reached: "
+                            f"{used}/"
+                            f"{INTERNAL_HOURLY_LIMIT}. "
+                            "Waiting."
+                        )
+
+                        time.sleep(
+                            BUDGET_WAIT_SECONDS
+                        )
+
+                        continue
+
+                    # ----------------------------------------
+                    # SELECT LEAST-COMPLETE SERIES
+                    # ----------------------------------------
+
+                    selected = (
+                        select_next_market(
+                            status
+                        )
+                    )
+
+                    if selected is None:
+
+                        log(
+                            "No missing historical series."
+                        )
+
+                        time.sleep(
+                            READY_SLEEP_SECONDS
+                        )
+
+                        continue
+
+                    symbol = selected[
+                        "symbol"
+                    ]
+
+                    timeframe = selected[
+                        "timeframe"
+                    ]
+
+                    log(
+                        "Fetching next historical candle: "
+                        f"{symbol} {timeframe}"
+                    )
+
+                    # ----------------------------------------
+                    # ONE SAFE API REQUEST
+                    # ----------------------------------------
+
+                    result = (
+                        fetch_gold_api_ohlc(
+                            symbol,
+                            timeframe,
+                        )
+                    )
+
+                    state[
+                        "last_result"
+                    ] = result
+
+                    state[
+                        "last_error"
+                    ] = None
+
+                    if result.get(
+                        "ok",
+                        False,
+                    ):
+
+                        log(
+                            "Historical candle stored: "
+                            f"{symbol} {timeframe}"
+                        )
+
+                    elif result.get(
+                        "rate_limited_locally",
+                        False,
+                    ):
+
+                        log(
+                            "Local API budget reached."
+                        )
+
+                        time.sleep(
+                            BUDGET_WAIT_SECONDS
+                        )
+
+                        continue
+
+                    elif result.get(
+                        "provider_rate_limited",
+                        False,
+                    ):
+
+                        log(
+                            "Gold-API rate limit reached. "
+                            "Waiting safely."
+                        )
+
+                        time.sleep(
+                            BUDGET_WAIT_SECONDS
+                        )
+
+                        continue
+
+                    else:
+
+                        log(
+                            "Historical request returned "
+                            f"no usable candle: {result}"
+                        )
+
+                    # One request every 8 minutes.
+                    time.sleep(
+                        REQUEST_INTERVAL_SECONDS
+                    )
+
+                except Exception as error:
+
+                    state[
+                        "last_error"
+                    ] = str(
+                        error
+                    )
+
+                    log(
+                        "Runtime cycle error: "
+                        f"{error}"
+                    )
+
+                    time.sleep(
+                        ERROR_SLEEP_SECONDS
+                    )
+
+        except Exception as error:
+
+            state[
+                "last_error"
+            ] = str(
+                error
+            )
+
+            log(
+                "Runtime startup error: "
+                f"{error}"
+            )
+
+        finally:
+
+            if (
+                lock_connection
+                is not None
+            ):
+
+                try:
+
+                    with (
+                        lock_connection.cursor()
+                    ) as cur:
+
+                        cur.execute(
+                            """
+                            SELECT pg_advisory_unlock(%s)
+                            """,
+                            (
+                                ADVISORY_LOCK_ID,
+                            ),
+                        )
+
+                except Exception:
+
+                    pass
+
+                try:
+
+                    lock_connection.close()
+
+                except Exception:
+
+                    pass
+
+    thread = threading.Thread(
+        target=worker_loop,
+        name="metals-auto-bootstrap",
+        daemon=True,
+    )
+
+    thread.start()
+
+    state[
+        "started"
+    ] = True
+
+    return state
+
+
+# ============================================================
+# START AUTOMATIC BOOTSTRAP
+# ============================================================
+
+_metals_auto_bootstrap_state = (
+    start_metals_auto_bootstrap()
+)
