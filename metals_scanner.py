@@ -1,7 +1,7 @@
 """
 metals_scanner.py
 
-PRO AI QUANT TERMINAL V3.7
+PRO AI QUANT TERMINAL V3.8
 
 Gold / Silver Multi-Timeframe Safety Scanner
 
@@ -24,9 +24,8 @@ Indicators:
 
 Safety:
 - Fresh live quote required
-- Stale quotes cannot approve trades
-- Fresh candle data required
-- Stale candle cache cannot approve trades
+- Local PostgreSQL candles required
+- WARMING_UP state while history builds
 - All 15m / 1h / 4h timeframes must be valid
 - Higher timeframe confirmation required
 - ATR target validation required
@@ -44,6 +43,7 @@ import pandas as pd
 from metals_candles import (
     get_metals_mtf_candles,
     metals_candles_cache_status,
+    get_metals_candle_readiness,
 )
 
 from metals_engine import (
@@ -72,18 +72,12 @@ TIMEFRAMES = (
 
 MIN_CANDLES = 60
 
-
-# Entry thresholds.
 MIN_ENTRY_SCORE = 6
 MIN_MTF_CONFIDENCE = 66.0
 
-
-# RSI limits.
 RSI_OVERSOLD = 30.0
 RSI_OVERBOUGHT = 70.0
 
-
-# ATR-based trade management.
 ATR_SL_MULTIPLIER = {
     "XAUUSD": 1.50,
     "XAGUSD": 1.65,
@@ -93,7 +87,6 @@ ATR_TP_MULTIPLIER = {
     "XAUUSD": 2.40,
     "XAGUSD": 2.60,
 }
-
 
 DEFAULT_METALS_RISK_PCT = 1.0
 
@@ -161,56 +154,23 @@ def _no_trade_result(
 ) -> Dict:
 
     return {
-        "symbol":
-            symbol,
-
-        "asset_class":
-            "METAL",
-
-        "signal":
-            "NO TRADE",
-
-        "score":
-            0.0,
-
-        "mtf_confidence":
-            0.0,
-
-        "higher_tf_confirmed":
-            False,
-
-        "approved":
-            False,
-
-        "entry_price":
-            0.0,
-
-        "targets":
-            {},
-
-        "risk_pct":
-            DEFAULT_METALS_RISK_PCT,
-
-        "timeframes":
-            timeframes or {},
-
-        "market_snapshot":
-            market_snapshot or {},
-
-        "quote":
-            quote or {},
-
-        "quote_fresh":
-            False,
-
-        "candles_fresh":
-            False,
-
-        "safety_gate":
-            False,
-
-        "reason":
-            reason,
+        "symbol": symbol,
+        "asset_class": "METAL",
+        "signal": "NO TRADE",
+        "score": 0.0,
+        "mtf_confidence": 0.0,
+        "higher_tf_confirmed": False,
+        "approved": False,
+        "entry_price": 0.0,
+        "targets": {},
+        "risk_pct": DEFAULT_METALS_RISK_PCT,
+        "timeframes": timeframes or {},
+        "market_snapshot": market_snapshot or {},
+        "quote": quote or {},
+        "quote_fresh": False,
+        "candles_fresh": False,
+        "safety_gate": False,
+        "reason": reason,
     }
 
 
@@ -256,32 +216,43 @@ def _quote_is_safe(
 
 
 # ============================================================
-# CANDLE SAFETY
+# CANDLE CACHE EXPECTATION
 # ============================================================
 
 def _expected_candle_cache_keys(
     symbol: str,
-) -> Dict[str, str]:
+):
 
     return {
-        "15m":
-            f"{symbol}:15min:200",
-
-        "1h":
-            f"{symbol}:1h:200",
-
-        "4h":
-            f"{symbol}:4h:200",
+        "15m": f"{symbol}:15min:200",
+        "1h": f"{symbol}:1h:200",
+        "4h": f"{symbol}:4h:200",
     }
 
+
+# ============================================================
+# CANDLE FRESHNESS
+# ============================================================
 
 def _check_candle_freshness(
     symbol: str,
 ) -> Dict:
 
-    status = (
-        metals_candles_cache_status()
-    )
+    try:
+
+        cache_status = (
+            metals_candles_cache_status(
+                symbol
+            )
+        )
+
+    except Exception as error:
+
+        return {
+            "all_fresh": False,
+            "timeframes": {},
+            "reason": str(error),
+        }
 
     expected = (
         _expected_candle_cache_keys(
@@ -289,77 +260,75 @@ def _check_candle_freshness(
         )
     )
 
-    result = {}
+    frames = {}
 
     all_fresh = True
 
-    for timeframe, key in (
+    for timeframe, cache_key in (
         expected.items()
     ):
 
-        record = status.get(
-            key
+        info = (
+            cache_status.get(
+                cache_key,
+                {}
+            )
         )
 
-        if not isinstance(
-            record,
-            dict,
-        ):
-
-            result[
-                timeframe
-            ] = {
-                "fresh":
-                    False,
-
-                "reason":
-                    "No candle cache record",
-            }
-
-            all_fresh = False
-
-            continue
-
         fresh = bool(
-            record.get(
+            info.get(
                 "fresh",
                 False,
             )
         )
 
-        result[
+        frames[
             timeframe
         ] = {
-            "fresh":
+            "fresh": fresh,
+            "ready": info.get(
+                "ready",
                 fresh,
-
-            "age_seconds":
-                record.get(
-                    "age_seconds"
+            ),
+            "state": info.get(
+                "state",
+                (
+                    "READY"
+                    if fresh
+                    else "WARMING_UP"
                 ),
-
-            "stale_usable":
-                record.get(
-                    "stale_usable",
-                    False,
-                ),
+            ),
+            "candles": info.get(
+                "candles",
+                0,
+            ),
+            "minimum": info.get(
+                "minimum",
+                MIN_CANDLES,
+            ),
+            "remaining": info.get(
+                "remaining",
+                0,
+            ),
+            "source": info.get(
+                "source",
+                "LOCAL_POSTGRES_OHLC",
+            ),
         }
 
         if not fresh:
             all_fresh = False
 
     return {
-        "all_fresh":
-            all_fresh,
-
-        "timeframes":
-            result,
-
-        "provider_cooldown_seconds":
-            status.get(
-                "provider_cooldown_seconds",
-                0,
-            ),
+        "all_fresh": all_fresh,
+        "timeframes": frames,
+        "provider": cache_status.get(
+            "provider"
+        ),
+        "external_api": cache_status.get(
+            "external_api",
+            False,
+        ),
     }
 
 
@@ -368,14 +337,34 @@ def _check_candle_freshness(
 # ============================================================
 
 def calculate_ema(
-    series: pd.Series,
-    period: int,
-) -> pd.Series:
+    series,
+    period,
+):
 
-    return series.ewm(
-        span=period,
-        adjust=False,
-    ).mean()
+    numeric = (
+        pd.to_numeric(
+            series,
+            errors="coerce",
+        )
+        .dropna()
+    )
+
+    if len(numeric) < period:
+        return 0.0
+
+    result = (
+        numeric
+        .ewm(
+            span=period,
+            adjust=False,
+        )
+        .mean()
+        .iloc[-1]
+    )
+
+    return _safe_float(
+        result
+    )
 
 
 # ============================================================
@@ -383,40 +372,71 @@ def calculate_ema(
 # ============================================================
 
 def calculate_rsi(
-    close: pd.Series,
-    period: int = 14,
-) -> pd.Series:
+    series,
+    period=14,
+):
 
-    delta = close.diff()
-
-    gain = delta.clip(
-        lower=0
+    numeric = (
+        pd.to_numeric(
+            series,
+            errors="coerce",
+        )
+        .dropna()
     )
 
-    loss = (
+    if len(numeric) < (
+        period + 1
+    ):
+        return 50.0
+
+    delta = (
+        numeric.diff()
+    )
+
+    gains = (
+        delta.clip(
+            lower=0
+        )
+    )
+
+    losses = (
         -delta.clip(
             upper=0
         )
     )
 
-    average_gain = gain.ewm(
-        alpha=1 / period,
-        adjust=False,
-        min_periods=period,
-    ).mean()
+    average_gain = (
+        gains
+        .ewm(
+            alpha=1 / period,
+            adjust=False,
+        )
+        .mean()
+    )
 
-    average_loss = loss.ewm(
-        alpha=1 / period,
-        adjust=False,
-        min_periods=period,
-    ).mean()
+    average_loss = (
+        losses
+        .ewm(
+            alpha=1 / period,
+            adjust=False,
+        )
+        .mean()
+    )
+
+    last_gain = _safe_float(
+        average_gain.iloc[-1]
+    )
+
+    last_loss = _safe_float(
+        average_loss.iloc[-1]
+    )
+
+    if last_loss <= 0:
+        return 100.0
 
     rs = (
-        average_gain
-        / average_loss.replace(
-            0,
-            np.nan,
-        )
+        last_gain
+        / last_loss
     )
 
     rsi = (
@@ -429,11 +449,10 @@ def calculate_rsi(
         )
     )
 
-    rsi = rsi.fillna(
-        50.0
+    return _safe_float(
+        rsi,
+        50.0,
     )
-
-    return rsi
 
 
 # ============================================================
@@ -441,39 +460,78 @@ def calculate_rsi(
 # ============================================================
 
 def calculate_macd(
-    close: pd.Series,
+    series,
 ):
 
-    ema12 = calculate_ema(
-        close,
-        12,
+    numeric = (
+        pd.to_numeric(
+            series,
+            errors="coerce",
+        )
+        .dropna()
     )
 
-    ema26 = calculate_ema(
-        close,
-        26,
+    if len(numeric) < 35:
+
+        return {
+            "macd": 0.0,
+            "signal": 0.0,
+            "histogram": 0.0,
+        }
+
+    ema_fast = (
+        numeric
+        .ewm(
+            span=12,
+            adjust=False,
+        )
+        .mean()
     )
 
-    macd = (
-        ema12
-        - ema26
+    ema_slow = (
+        numeric
+        .ewm(
+            span=26,
+            adjust=False,
+        )
+        .mean()
     )
 
-    signal = calculate_ema(
-        macd,
-        9,
+    macd_line = (
+        ema_fast
+        - ema_slow
+    )
+
+    signal_line = (
+        macd_line
+        .ewm(
+            span=9,
+            adjust=False,
+        )
+        .mean()
     )
 
     histogram = (
-        macd
-        - signal
+        macd_line
+        - signal_line
     )
 
-    return (
-        macd,
-        signal,
-        histogram,
-    )
+    return {
+        "macd":
+            _safe_float(
+                macd_line.iloc[-1]
+            ),
+
+        "signal":
+            _safe_float(
+                signal_line.iloc[-1]
+            ),
+
+        "histogram":
+            _safe_float(
+                histogram.iloc[-1]
+            ),
+    }
 
 
 # ============================================================
@@ -481,46 +539,79 @@ def calculate_macd(
 # ============================================================
 
 def calculate_atr(
-    df: pd.DataFrame,
-    period: int = 14,
-) -> pd.Series:
+    dataframe,
+    period=14,
+):
+
+    if (
+        dataframe is None
+        or dataframe.empty
+        or len(dataframe)
+        < (
+            period + 1
+        )
+    ):
+
+        return 0.0
+
+    high = (
+        pd.to_numeric(
+            dataframe["high"],
+            errors="coerce",
+        )
+    )
+
+    low = (
+        pd.to_numeric(
+            dataframe["low"],
+            errors="coerce",
+        )
+    )
+
+    close = (
+        pd.to_numeric(
+            dataframe["close"],
+            errors="coerce",
+        )
+    )
 
     previous_close = (
-        df["close"]
-        .shift(1)
+        close.shift(1)
     )
 
-    high_low = (
-        df["high"]
-        - df["low"]
+    true_range = (
+        pd.concat(
+            [
+                high - low,
+                (
+                    high
+                    - previous_close
+                ).abs(),
+                (
+                    low
+                    - previous_close
+                ).abs(),
+            ],
+            axis=1,
+        )
+        .max(
+            axis=1
+        )
     )
 
-    high_previous = (
-        df["high"]
-        - previous_close
-    ).abs()
-
-    low_previous = (
-        df["low"]
-        - previous_close
-    ).abs()
-
-    true_range = pd.concat(
-        [
-            high_low,
-            high_previous,
-            low_previous,
-        ],
-        axis=1,
-    ).max(
-        axis=1
+    atr = (
+        true_range
+        .ewm(
+            alpha=1 / period,
+            adjust=False,
+        )
+        .mean()
+        .iloc[-1]
     )
 
-    return true_range.ewm(
-        alpha=1 / period,
-        adjust=False,
-        min_periods=period,
-    ).mean()
+    return _safe_float(
+        atr
+    )
 
 
 # ============================================================
@@ -528,26 +619,32 @@ def calculate_atr(
 # ============================================================
 
 def calculate_momentum_pct(
-    close: pd.Series,
-    lookback: int = 10,
-) -> float:
+    series,
+    lookback=5,
+):
 
-    if len(close) <= lookback:
+    numeric = (
+        pd.to_numeric(
+            series,
+            errors="coerce",
+        )
+        .dropna()
+    )
 
+    if len(numeric) <= lookback:
         return 0.0
 
     current = _safe_float(
-        close.iloc[-1]
+        numeric.iloc[-1]
     )
 
     previous = _safe_float(
-        close.iloc[
+        numeric.iloc[
             -1 - lookback
         ]
     )
 
     if previous <= 0:
-
         return 0.0
 
     return (
@@ -558,221 +655,134 @@ def calculate_momentum_pct(
         / previous
         * 100
     )
-
-
-# ============================================================
-# ANALYSE ONE TIMEFRAME
+    # ============================================================
+# TIMEFRAME ANALYSIS
 # ============================================================
 
-def analyse_timeframe(
-    df: pd.DataFrame,
+def analyze_timeframe(
+    dataframe: pd.DataFrame,
     timeframe: str,
 ) -> Dict:
 
-    if df is None:
-
-        return _empty_timeframe_result(
-            timeframe,
-            "No candle dataframe",
+    if (
+        dataframe is None
+        or not isinstance(
+            dataframe,
+            pd.DataFrame,
         )
-
-    if df.empty:
+        or dataframe.empty
+    ):
 
         return _empty_timeframe_result(
             timeframe,
             "No candle data",
         )
 
-    if len(df) < MIN_CANDLES:
-
-        return _empty_timeframe_result(
-            timeframe,
-            (
-                f"Insufficient candles: "
-                f"{len(df)}"
-            ),
-        )
-
-    required = {
+    required_columns = {
         "open",
         "high",
         "low",
         "close",
     }
 
-    if not required.issubset(
-        df.columns
+    if not required_columns.issubset(
+        set(
+            dataframe.columns
+        )
     ):
 
         return _empty_timeframe_result(
             timeframe,
-            "OHLC columns missing",
+            "Missing OHLC columns",
         )
 
-    work = (
-        df.copy()
-        .reset_index(
-            drop=True
-        )
-    )
-
-    for column in required:
-
-        work[
-            column
-        ] = pd.to_numeric(
-            work[
-                column
-            ],
-            errors="coerce",
-        )
-
-    work = work.dropna(
-        subset=list(
-            required
-        )
-    )
-
-    if len(work) < MIN_CANDLES:
+    if len(
+        dataframe
+    ) < MIN_CANDLES:
 
         return _empty_timeframe_result(
             timeframe,
-            "Insufficient clean candles",
+            (
+                "Insufficient candles: "
+                f"{len(dataframe)}/{MIN_CANDLES}"
+            ),
         )
 
-    close = work[
-        "close"
-    ]
+    close = (
+        pd.to_numeric(
+            dataframe["close"],
+            errors="coerce",
+        )
+        .dropna()
+    )
 
-    work[
-        "ema20"
-    ] = calculate_ema(
+    if len(
+        close
+    ) < MIN_CANDLES:
+
+        return _empty_timeframe_result(
+            timeframe,
+            "Invalid close series",
+        )
+
+    last_close = _safe_float(
+        close.iloc[-1]
+    )
+
+    if last_close <= 0:
+
+        return _empty_timeframe_result(
+            timeframe,
+            "Invalid last close",
+        )
+
+    ema20 = calculate_ema(
         close,
         20,
     )
 
-    work[
-        "ema50"
-    ] = calculate_ema(
+    ema50 = calculate_ema(
         close,
         50,
     )
 
-    work[
-        "rsi"
-    ] = calculate_rsi(
+    rsi = calculate_rsi(
         close,
         14,
     )
 
-    (
-        macd,
-        macd_signal,
-        macd_histogram,
-    ) = calculate_macd(
+    macd = calculate_macd(
         close
     )
 
-    work[
-        "macd"
-    ] = macd
-
-    work[
-        "macd_signal"
-    ] = macd_signal
-
-    work[
-        "macd_histogram"
-    ] = macd_histogram
-
-    work[
-        "atr"
-    ] = calculate_atr(
-        work,
+    atr = calculate_atr(
+        dataframe,
         14,
     )
-
-    latest = work.iloc[
-        -1
-    ]
-
-    previous = work.iloc[
-        -2
-    ]
-
-    price = _safe_float(
-        latest[
-            "close"
-        ]
-    )
-
-    ema20 = _safe_float(
-        latest[
-            "ema20"
-        ]
-    )
-
-    ema50 = _safe_float(
-        latest[
-            "ema50"
-        ]
-    )
-
-    rsi = _safe_float(
-        latest[
-            "rsi"
-        ],
-        50.0,
-    )
-
-    macd_value = _safe_float(
-        latest[
-            "macd"
-        ]
-    )
-
-    macd_signal_value = _safe_float(
-        latest[
-            "macd_signal"
-        ]
-    )
-
-    macd_hist = _safe_float(
-        latest[
-            "macd_histogram"
-        ]
-    )
-
-    previous_hist = _safe_float(
-        previous[
-            "macd_histogram"
-        ]
-    )
-
-    atr = _safe_float(
-        latest[
-            "atr"
-        ]
-    )
-
-    atr_pct = 0.0
-
-    if price > 0:
-
-        atr_pct = (
-            atr
-            / price
-            * 100
-        )
 
     momentum_pct = (
         calculate_momentum_pct(
             close,
-            10,
+            5,
         )
     )
 
-    score = 0
+    atr_pct = 0.0
+
+    if (
+        atr > 0
+        and last_close > 0
+    ):
+
+        atr_pct = (
+            atr
+            / last_close
+            * 100
+        )
+
+    bullish_score = 0
+    bearish_score = 0
+
     reasons = []
 
     # --------------------------------------------------------
@@ -780,131 +790,117 @@ def analyse_timeframe(
     # --------------------------------------------------------
 
     if (
-        price > ema20
-        and ema20 > ema50
+        ema20 > ema50
+        and last_close > ema20
     ):
 
-        score += 2
-
+        bullish_score += 2
         reasons.append(
-            "Bullish EMA trend"
+            "EMA trend bullish"
         )
 
     elif (
-        price < ema20
-        and ema20 < ema50
+        ema20 < ema50
+        and last_close < ema20
     ):
 
-        score -= 2
-
+        bearish_score += 2
         reasons.append(
-            "Bearish EMA trend"
+            "EMA trend bearish"
         )
 
-    else:
+    # --------------------------------------------------------
+    # RSI
+    # --------------------------------------------------------
 
+    if (
+        50.0 < rsi < RSI_OVERBOUGHT
+    ):
+
+        bullish_score += 1
         reasons.append(
-            "Mixed EMA trend"
+            "RSI bullish"
+        )
+
+    elif (
+        RSI_OVERSOLD < rsi < 50.0
+    ):
+
+        bearish_score += 1
+        reasons.append(
+            "RSI bearish"
+        )
+
+    elif rsi <= RSI_OVERSOLD:
+
+        bullish_score += 1
+        reasons.append(
+            "RSI oversold"
+        )
+
+    elif rsi >= RSI_OVERBOUGHT:
+
+        bearish_score += 1
+        reasons.append(
+            "RSI overbought"
         )
 
     # --------------------------------------------------------
     # MACD
     # --------------------------------------------------------
 
+    macd_line = _safe_float(
+        macd.get(
+            "macd"
+        )
+    )
+
+    macd_signal = _safe_float(
+        macd.get(
+            "signal"
+        )
+    )
+
+    macd_histogram = _safe_float(
+        macd.get(
+            "histogram"
+        )
+    )
+
     if (
-        macd_value
-        > macd_signal_value
-        and macd_hist > 0
+        macd_line > macd_signal
+        and macd_histogram > 0
     ):
 
-        score += 2
-
+        bullish_score += 2
         reasons.append(
             "MACD bullish"
         )
 
-        if (
-            macd_hist
-            > previous_hist
-        ):
-
-            score += 1
-
-            reasons.append(
-                "MACD momentum rising"
-            )
-
     elif (
-        macd_value
-        < macd_signal_value
-        and macd_hist < 0
+        macd_line < macd_signal
+        and macd_histogram < 0
     ):
 
-        score -= 2
-
+        bearish_score += 2
         reasons.append(
             "MACD bearish"
-        )
-
-        if (
-            macd_hist
-            < previous_hist
-        ):
-
-            score -= 1
-
-            reasons.append(
-                "MACD downside strengthening"
-            )
-
-    # --------------------------------------------------------
-    # RSI
-    # --------------------------------------------------------
-
-    if 52 <= rsi <= 68:
-
-        score += 1
-
-        reasons.append(
-            "RSI bullish zone"
-        )
-
-    elif 32 <= rsi <= 48:
-
-        score -= 1
-
-        reasons.append(
-            "RSI bearish zone"
-        )
-
-    elif rsi < RSI_OVERSOLD:
-
-        reasons.append(
-            "RSI oversold"
-        )
-
-    elif rsi > RSI_OVERBOUGHT:
-
-        reasons.append(
-            "RSI overbought"
         )
 
     # --------------------------------------------------------
     # MOMENTUM
     # --------------------------------------------------------
 
-    if momentum_pct > 0.15:
+    if momentum_pct > 0:
 
-        score += 1
-
+        bullish_score += 1
         reasons.append(
             "Positive momentum"
         )
 
-    elif momentum_pct < -0.15:
+    elif momentum_pct < 0:
 
-        score -= 1
-
+        bearish_score += 1
         reasons.append(
             "Negative momentum"
         )
@@ -913,25 +909,34 @@ def analyse_timeframe(
     # DIRECTION
     # --------------------------------------------------------
 
-    if score >= 3:
+    if bullish_score > bearish_score:
 
         direction = "BULLISH"
+        score = bullish_score
 
-    elif score <= -3:
+    elif bearish_score > bullish_score:
 
         direction = "BEARISH"
+        score = bearish_score
 
     else:
 
         direction = "NEUTRAL"
+        score = 0
 
-    confidence = min(
-        100.0,
-        abs(
-            score
+    max_score = 6
+
+    confidence = (
+        min(
+            100.0,
+            (
+                score
+                / max_score
+                * 100
+            ),
         )
-        / 6
-        * 100,
+        if score > 0
+        else 0.0
     )
 
     return {
@@ -945,9 +950,7 @@ def analyse_timeframe(
             direction,
 
         "score":
-            int(
-                score
-            ),
+            score,
 
         "confidence":
             round(
@@ -956,64 +959,40 @@ def analyse_timeframe(
             ),
 
         "close":
-            round(
-                price,
-                6,
-            ),
+            last_close,
 
         "ema20":
-            round(
-                ema20,
-                6,
-            ),
+            ema20,
 
         "ema50":
-            round(
-                ema50,
-                6,
-            ),
+            ema50,
 
         "rsi":
-            round(
-                rsi,
-                2,
-            ),
+            rsi,
 
         "macd":
-            round(
-                macd_value,
-                6,
-            ),
+            macd_line,
 
         "macd_signal":
-            round(
-                macd_signal_value,
-                6,
-            ),
+            macd_signal,
 
         "macd_histogram":
-            round(
-                macd_hist,
-                6,
-            ),
+            macd_histogram,
 
         "atr":
-            round(
-                atr,
-                6,
-            ),
+            atr,
 
         "atr_pct":
-            round(
-                atr_pct,
-                3,
-            ),
+            atr_pct,
 
         "momentum_pct":
-            round(
-                momentum_pct,
-                3,
-            ),
+            momentum_pct,
+
+        "bullish_score":
+            bullish_score,
+
+        "bearish_score":
+            bearish_score,
 
         "reason":
             ", ".join(
@@ -1023,130 +1002,242 @@ def analyse_timeframe(
 
 
 # ============================================================
-# MTF WEIGHTING
+# MULTI-TIMEFRAME ANALYSIS
 # ============================================================
 
-TIMEFRAME_WEIGHT = {
-    "15m": 1.0,
-    "1h": 1.5,
-    "4h": 2.0,
-}
+def analyze_metals_mtf(
+    symbol: str,
+) -> Dict:
+
+    try:
+
+        bundle = (
+            get_metals_mtf_candles(
+                symbol=symbol,
+                limit=200,
+            )
+        )
+
+    except Exception as error:
+
+        return {
+            timeframe:
+                _empty_timeframe_result(
+                    timeframe,
+                    str(
+                        error
+                    ),
+                )
+            for timeframe in TIMEFRAMES
+        }
+
+    results = {}
+
+    for timeframe in TIMEFRAMES:
+
+        dataframe = (
+            bundle.get(
+                timeframe
+            )
+        )
+
+        results[
+            timeframe
+        ] = analyze_timeframe(
+            dataframe,
+            timeframe,
+        )
+
+    return results
 
 
-def calculate_weighted_score(
-    analyses: Dict[str, Dict],
-) -> float:
+# ============================================================
+# HIGHER TIMEFRAME CONFIRMATION
+# ============================================================
 
-    total = 0.0
+def higher_timeframe_confirmation(
+    analyses: Dict,
+    desired_direction: str,
+) -> Dict:
 
-    for timeframe, analysis in (
-        analyses.items()
+    one_hour = (
+        analyses.get(
+            "1h",
+            {}
+        )
+    )
+
+    four_hour = (
+        analyses.get(
+            "4h",
+            {}
+        )
+    )
+
+    confirmations = 0
+
+    total = 2
+
+    if (
+        one_hour.get(
+            "valid",
+            False,
+        )
+        and one_hour.get(
+            "direction"
+        )
+        == desired_direction
     ):
 
-        if not analysis.get(
+        confirmations += 1
+
+    if (
+        four_hour.get(
+            "valid",
+            False,
+        )
+        and four_hour.get(
+            "direction"
+        )
+        == desired_direction
+    ):
+
+        confirmations += 1
+
+    confidence = (
+        confirmations
+        / total
+        * 100
+    )
+
+    return {
+        "confirmed":
+            confirmations
+            == total,
+
+        "confirmations":
+            confirmations,
+
+        "total":
+            total,
+
+        "confidence":
+            round(
+                confidence,
+                2,
+            ),
+    }
+
+
+# ============================================================
+# WEIGHTED MTF SCORE
+# ============================================================
+
+def calculate_weighted_mtf_score(
+    analyses: Dict,
+) -> Dict:
+
+    weights = {
+        "15m": 0.30,
+        "1h": 0.35,
+        "4h": 0.35,
+    }
+
+    bullish = 0.0
+    bearish = 0.0
+
+    for timeframe, weight in (
+        weights.items()
+    ):
+
+        info = (
+            analyses.get(
+                timeframe,
+                {}
+            )
+        )
+
+        if not info.get(
             "valid",
             False,
         ):
+
             continue
 
-        weight = TIMEFRAME_WEIGHT.get(
-            timeframe,
-            1.0,
+        score = _safe_float(
+            info.get(
+                "score"
+            )
         )
 
-        total += (
-            _safe_float(
-                analysis.get(
-                    "score"
-                )
+        direction = (
+            info.get(
+                "direction"
             )
+        )
+
+        weighted = (
+            score
             * weight
         )
 
-    return round(
-        total,
-        2,
-    )
+        if direction == "BULLISH":
 
+            bullish += weighted
 
-# ============================================================
-# MTF CONFIDENCE
-# ============================================================
+        elif direction == "BEARISH":
 
-def calculate_mtf_confidence(
-    analyses: Dict[str, Dict],
-    direction: str,
-) -> float:
+            bearish += weighted
 
-    valid = [
-        analysis
-        for analysis in analyses.values()
-        if analysis.get(
-            "valid",
-            False,
-        )
-    ]
+    if bullish > bearish:
 
-    if not valid:
+        direction = "BULLISH"
+        net_score = bullish
 
-        return 0.0
+    elif bearish > bullish:
 
-    if direction == "BUY":
-
-        aligned = sum(
-            1
-            for analysis in valid
-            if analysis.get(
-                "direction"
-            ) == "BULLISH"
-        )
-
-    elif direction == "SELL":
-
-        aligned = sum(
-            1
-            for analysis in valid
-            if analysis.get(
-                "direction"
-            ) == "BEARISH"
-        )
+        direction = "BEARISH"
+        net_score = bearish
 
     else:
 
-        return 0.0
+        direction = "NEUTRAL"
+        net_score = 0.0
 
-    return round(
-        aligned
-        / len(
-            valid
-        )
-        * 100,
-        2,
-    )
+    return {
+        "direction":
+            direction,
+
+        "bullish_score":
+            round(
+                bullish,
+                3,
+            ),
+
+        "bearish_score":
+            round(
+                bearish,
+                3,
+            ),
+
+        "net_score":
+            round(
+                net_score,
+                3,
+            ),
+    }
 
 
 # ============================================================
-# ATR TP / SL
+# TARGET BUILDER
 # ============================================================
 
-def calculate_metals_targets(
+def build_metal_targets(
     symbol: str,
     signal: str,
     entry_price: float,
     atr: float,
 ) -> Dict:
-
-    symbol = (
-        str(symbol)
-        .upper()
-        .strip()
-    )
-
-    signal = (
-        str(signal)
-        .upper()
-        .strip()
-    )
 
     entry_price = _safe_float(
         entry_price
@@ -1161,124 +1252,1277 @@ def calculate_metals_targets(
         or atr <= 0
     ):
 
-        return {
-            "valid": False,
-            "take_profit": None,
-            "stop_loss": None,
-            "risk_reward": 0.0,
-        }
+        return {}
 
     sl_multiplier = (
         ATR_SL_MULTIPLIER.get(
             symbol,
-            1.5,
+            1.50,
         )
     )
 
     tp_multiplier = (
         ATR_TP_MULTIPLIER.get(
             symbol,
-            2.4,
+            2.40,
         )
-    )
-
-    sl_distance = (
-        atr
-        * sl_multiplier
-    )
-
-    tp_distance = (
-        atr
-        * tp_multiplier
     )
 
     if signal == "BUY":
 
-        take_profit = (
-            entry_price
-            + tp_distance
-        )
-
         stop_loss = (
             entry_price
-            - sl_distance
+            - (
+                atr
+                * sl_multiplier
+            )
+        )
+
+        take_profit = (
+            entry_price
+            + (
+                atr
+                * tp_multiplier
+            )
         )
 
     elif signal == "SELL":
 
-        take_profit = (
-            entry_price
-            - tp_distance
-        )
-
         stop_loss = (
             entry_price
-            + sl_distance
+            + (
+                atr
+                * sl_multiplier
+            )
+        )
+
+        take_profit = (
+            entry_price
+            - (
+                atr
+                * tp_multiplier
+            )
         )
 
     else:
 
-        return {
-            "valid": False,
-            "take_profit": None,
-            "stop_loss": None,
-            "risk_reward": 0.0,
-        }
+        return {}
 
-    risk_reward = 0.0
+    risk_distance = abs(
+        entry_price
+        - stop_loss
+    )
 
-    if sl_distance > 0:
+    reward_distance = abs(
+        take_profit
+        - entry_price
+    )
 
-        risk_reward = (
-            tp_distance
-            / sl_distance
+    rr = 0.0
+
+    if risk_distance > 0:
+
+        rr = (
+            reward_distance
+            / risk_distance
         )
 
     return {
-        "valid":
-            True,
+        "entry":
+            entry_price,
 
         "take_profit":
-            round(
-                take_profit,
-                6,
-            ),
+            take_profit,
 
         "stop_loss":
-            round(
-                stop_loss,
-                6,
-            ),
+            stop_loss,
 
-        "tp_distance":
-            round(
-                tp_distance,
-                6,
-            ),
+        "risk_distance":
+            risk_distance,
 
-        "sl_distance":
-            round(
-                sl_distance,
-                6,
-            ),
+        "reward_distance":
+            reward_distance,
 
         "risk_reward":
-            round(
-                risk_reward,
-                2,
-            ),
+            rr,
 
         "atr":
-            round(
-                atr,
-                6,
-            ),
+            atr,
 
         "atr_sl_multiplier":
             sl_multiplier,
 
         "atr_tp_multiplier":
             tp_multiplier,
+    }
+    # ============================================================
+# SIGNAL DIRECTION
+# ============================================================
+
+def determine_signal(
+    analyses: Dict,
+) -> Dict:
+
+    weighted = (
+        calculate_weighted_mtf_score(
+            analyses
+        )
+    )
+
+    direction = (
+        weighted.get(
+            "direction",
+            "NEUTRAL",
+        )
+    )
+
+    if direction == "BULLISH":
+
+        signal = "BUY"
+
+    elif direction == "BEARISH":
+
+        signal = "SELL"
+
+    else:
+
+        signal = "NO TRADE"
+
+    return {
+        "signal":
+            signal,
+
+        "direction":
+            direction,
+
+        "weighted":
+            weighted,
+    }
+
+
+# ============================================================
+# WARM-UP PROGRESS
+# ============================================================
+
+def _build_warmup_reason(
+    readiness: Dict,
+) -> str:
+
+    frames = (
+        readiness.get(
+            "timeframes",
+            {},
+        )
+    )
+
+    progress = []
+
+    for timeframe in TIMEFRAMES:
+
+        info = (
+            frames.get(
+                timeframe,
+                {},
+            )
+        )
+
+        candles = int(
+            info.get(
+                "candles",
+                0,
+            )
+            or 0
+        )
+
+        minimum = int(
+            info.get(
+                "minimum",
+                MIN_CANDLES,
+            )
+            or MIN_CANDLES
+        )
+
+        progress.append(
+            f"{timeframe}: "
+            f"{candles}/{minimum}"
+        )
+
+    return (
+        "WARMING UP — building local "
+        "Gold/Silver MTF history | "
+        + " | ".join(
+            progress
+        )
+    )
+
+
+# ============================================================
+# MAIN SINGLE-MARKET SCANNER
+# ============================================================
+
+def scan_metal_market(
+    symbol: str,
+) -> Dict:
+
+    symbol = (
+        str(symbol)
+        .upper()
+        .replace("/", "")
+        .replace("-", "")
+        .replace(" ", "")
+        .strip()
+    )
+
+    if symbol not in METAL_MARKETS:
+
+        return _no_trade_result(
+            symbol,
+            "Unsupported metals market",
+        )
+
+    # --------------------------------------------------------
+    # LIVE QUOTE
+    # --------------------------------------------------------
+
+    try:
+
+        quote = (
+            get_metal_quote(
+                symbol
+            )
+        )
+
+    except Exception as error:
+
+        return _no_trade_result(
+            symbol,
+            (
+                "Metals quote error: "
+                f"{error}"
+            ),
+        )
+
+    if not _quote_is_safe(
+        quote
+    ):
+
+        return _no_trade_result(
+            symbol,
+            "Invalid or stale metals quote",
+            quote=quote,
+        )
+
+    entry_price = _safe_float(
+        quote.get(
+            "last"
+        )
+    )
+
+    # --------------------------------------------------------
+    # MARKET SNAPSHOT
+    # --------------------------------------------------------
+
+    try:
+
+        market_snapshot = (
+            build_metal_snapshot(
+                symbol
+            )
+        )
+
+    except Exception as error:
+
+        market_snapshot = {
+            "symbol": symbol,
+            "error": str(
+                error
+            ),
+        }
+
+    # --------------------------------------------------------
+    # SAFETY GATE 1:
+    # LOCAL CANDLE READINESS
+    # --------------------------------------------------------
+
+    try:
+
+        readiness = (
+            get_metals_candle_readiness(
+                symbol
+            )
+        )
+
+    except Exception as error:
+
+        return _no_trade_result(
+            symbol,
+            (
+                "Metals candle readiness "
+                f"error: {error}"
+            ),
+            market_snapshot=market_snapshot,
+            quote=quote,
+        )
+
+    if not readiness.get(
+        "ready",
+        False,
+    ):
+
+        result = (
+            _no_trade_result(
+                symbol,
+                _build_warmup_reason(
+                    readiness
+                ),
+                market_snapshot=market_snapshot,
+                quote=quote,
+            )
+        )
+
+        result[
+            "scanner_state"
+        ] = "WARMING_UP"
+
+        result[
+            "candle_readiness"
+        ] = readiness
+
+        result[
+            "history_ready"
+        ] = False
+
+        result[
+            "quote_fresh"
+        ] = bool(
+            readiness.get(
+                "quote_freshness",
+                {},
+            ).get(
+                "fresh",
+                False,
+            )
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # CANDLE CACHE SAFETY
+    # --------------------------------------------------------
+
+    candle_freshness = (
+        _check_candle_freshness(
+            symbol
+        )
+    )
+
+    if not candle_freshness.get(
+        "all_fresh",
+        False,
+    ):
+
+        result = (
+            _no_trade_result(
+                symbol,
+                (
+                    "Local metals candles "
+                    "are not ready/fresh"
+                ),
+                market_snapshot=market_snapshot,
+                quote=quote,
+            )
+        )
+
+        result[
+            "scanner_state"
+        ] = "WARMING_UP"
+
+        result[
+            "candle_readiness"
+        ] = readiness
+
+        result[
+            "candle_freshness"
+        ] = candle_freshness
+
+        result[
+            "history_ready"
+        ] = False
+
+        return result
+
+    # --------------------------------------------------------
+    # ANALYZE ALL TIMEFRAMES
+    # --------------------------------------------------------
+
+    analyses = (
+        analyze_metals_mtf(
+            symbol
+        )
+    )
+
+    # --------------------------------------------------------
+    # SAFETY GATE 2:
+    # EVERY TIMEFRAME MUST BE VALID
+    # --------------------------------------------------------
+
+    all_timeframes_valid = all(
+        analyses.get(
+            timeframe,
+            {},
+        ).get(
+            "valid",
+            False,
+        )
+        for timeframe in TIMEFRAMES
+    )
+
+    if not all_timeframes_valid:
+
+        invalid = [
+            timeframe
+            for timeframe in TIMEFRAMES
+            if not analyses.get(
+                timeframe,
+                {},
+            ).get(
+                "valid",
+                False,
+            )
+        ]
+
+        result = (
+            _no_trade_result(
+                symbol,
+                (
+                    "Candle history reports READY "
+                    "but analysis is invalid: "
+                    + ", ".join(
+                        invalid
+                    )
+                ),
+                market_snapshot=market_snapshot,
+                quote=quote,
+                timeframes=analyses,
+            )
+        )
+
+        result[
+            "scanner_state"
+        ] = "DATA_ERROR"
+
+        result[
+            "candle_readiness"
+        ] = readiness
+
+        result[
+            "history_ready"
+        ] = True
+
+        return result
+
+    # --------------------------------------------------------
+    # WEIGHTED MTF SIGNAL
+    # --------------------------------------------------------
+
+    signal_info = (
+        determine_signal(
+            analyses
+        )
+    )
+
+    signal = (
+        signal_info.get(
+            "signal",
+            "NO TRADE",
+        )
+    )
+
+    weighted = (
+        signal_info.get(
+            "weighted",
+            {},
+        )
+    )
+
+    weighted_direction = (
+        weighted.get(
+            "direction",
+            "NEUTRAL",
+        )
+    )
+
+    weighted_score = _safe_float(
+        weighted.get(
+            "net_score"
+        )
+    )
+
+    # --------------------------------------------------------
+    # NO DIRECTION
+    # --------------------------------------------------------
+
+    if signal == "NO TRADE":
+
+        result = (
+            _no_trade_result(
+                symbol,
+                "No clear MTF metals direction",
+                market_snapshot=market_snapshot,
+                quote=quote,
+                timeframes=analyses,
+            )
+        )
+
+        result[
+            "scanner_state"
+        ] = "READY"
+
+        result[
+            "history_ready"
+        ] = True
+
+        result[
+            "candle_readiness"
+        ] = readiness
+
+        result[
+            "weighted_mtf"
+        ] = weighted
+
+        result[
+            "quote_fresh"
+        ] = True
+
+        result[
+            "candles_fresh"
+        ] = True
+
+        return result
+
+    # --------------------------------------------------------
+    # HIGHER-TIMEFRAME CONFIRMATION
+    # --------------------------------------------------------
+
+    confirmation = (
+        higher_timeframe_confirmation(
+            analyses,
+            weighted_direction,
+        )
+    )
+
+    mtf_confidence = _safe_float(
+        confirmation.get(
+            "confidence"
+        )
+    )
+
+    # --------------------------------------------------------
+    # ENTRY TIMEFRAME
+    # --------------------------------------------------------
+
+    entry_tf = (
+        analyses.get(
+            "15m",
+            {}
+        )
+    )
+
+    entry_direction = (
+        entry_tf.get(
+            "direction",
+            "NEUTRAL",
+        )
+    )
+
+    expected_entry_direction = (
+        "BULLISH"
+        if signal == "BUY"
+        else "BEARISH"
+    )
+
+    if (
+        entry_direction
+        != expected_entry_direction
+    ):
+
+        result = (
+            _no_trade_result(
+                symbol,
+                (
+                    "15m entry timeframe does "
+                    "not confirm MTF direction"
+                ),
+                market_snapshot=market_snapshot,
+                quote=quote,
+                timeframes=analyses,
+            )
+        )
+
+        result[
+            "scanner_state"
+        ] = "READY"
+
+        result[
+            "history_ready"
+        ] = True
+
+        result[
+            "weighted_mtf"
+        ] = weighted
+
+        result[
+            "higher_tf_confirmation"
+        ] = confirmation
+
+        result[
+            "quote_fresh"
+        ] = True
+
+        result[
+            "candles_fresh"
+        ] = True
+
+        return result
+
+    # --------------------------------------------------------
+    # HIGHER-TF SAFETY GATE
+    # --------------------------------------------------------
+
+    if not confirmation.get(
+        "confirmed",
+        False,
+    ):
+
+        result = (
+            _no_trade_result(
+                symbol,
+                (
+                    "1h + 4h higher timeframe "
+                    "confirmation not aligned"
+                ),
+                market_snapshot=market_snapshot,
+                quote=quote,
+                timeframes=analyses,
+            )
+        )
+
+        result[
+            "scanner_state"
+        ] = "READY"
+
+        result[
+            "history_ready"
+        ] = True
+
+        result[
+            "weighted_mtf"
+        ] = weighted
+
+        result[
+            "higher_tf_confirmation"
+        ] = confirmation
+
+        result[
+            "quote_fresh"
+        ] = True
+
+        result[
+            "candles_fresh"
+        ] = True
+
+        return result
+
+    # --------------------------------------------------------
+    # CONFIDENCE GATE
+    # --------------------------------------------------------
+
+    if (
+        mtf_confidence
+        < MIN_MTF_CONFIDENCE
+    ):
+
+        result = (
+            _no_trade_result(
+                symbol,
+                (
+                    "MTF confidence below "
+                    "minimum threshold"
+                ),
+                market_snapshot=market_snapshot,
+                quote=quote,
+                timeframes=analyses,
+            )
+        )
+
+        result[
+            "scanner_state"
+        ] = "READY"
+
+        result[
+            "history_ready"
+        ] = True
+
+        result[
+            "weighted_mtf"
+        ] = weighted
+
+        result[
+            "higher_tf_confirmation"
+        ] = confirmation
+
+        result[
+            "quote_fresh"
+        ] = True
+
+        result[
+            "candles_fresh"
+        ] = True
+
+        return result
+
+    # --------------------------------------------------------
+    # ATR TARGET SOURCE
+    # --------------------------------------------------------
+
+    atr = _safe_float(
+        entry_tf.get(
+            "atr"
+        )
+    )
+
+    if atr <= 0:
+
+        result = (
+            _no_trade_result(
+                symbol,
+                "Invalid ATR for metals targets",
+                market_snapshot=market_snapshot,
+                quote=quote,
+                timeframes=analyses,
+            )
+        )
+
+        result[
+            "scanner_state"
+        ] = "DATA_ERROR"
+
+        result[
+            "history_ready"
+        ] = True
+
+        return result
+
+    # --------------------------------------------------------
+    # TARGETS
+    # --------------------------------------------------------
+
+    targets = (
+        build_metal_targets(
+            symbol=symbol,
+            signal=signal,
+            entry_price=entry_price,
+            atr=atr,
+        )
+    )
+
+    if not targets:
+
+        result = (
+            _no_trade_result(
+                symbol,
+                "Could not build safe metals targets",
+                market_snapshot=market_snapshot,
+                quote=quote,
+                timeframes=analyses,
+            )
+        )
+
+        result[
+            "scanner_state"
+        ] = "DATA_ERROR"
+
+        result[
+            "history_ready"
+        ] = True
+
+        return result
+
+    # --------------------------------------------------------
+    # RISK / REWARD GATE
+    # --------------------------------------------------------
+
+    risk_reward = _safe_float(
+        targets.get(
+            "risk_reward"
+        )
+    )
+
+    if risk_reward < 1.25:
+
+        result = (
+            _no_trade_result(
+                symbol,
+                (
+                    "Risk/reward below "
+                    "minimum threshold"
+                ),
+                market_snapshot=market_snapshot,
+                quote=quote,
+                timeframes=analyses,
+            )
+        )
+
+        result[
+            "scanner_state"
+        ] = "READY"
+
+        result[
+            "history_ready"
+        ] = True
+
+        result[
+            "targets"
+        ] = targets
+
+        return result
+        # --------------------------------------------------------
+    # FINAL SCORE NORMALIZATION
+    # --------------------------------------------------------
+
+    # Weighted MTF score is based on per-timeframe
+    # technical strength. Convert it into a cleaner
+    # 0–100 AI-style score for the UI / ranking layer.
+
+    ai_score = min(
+        100.0,
+        (
+            weighted_score
+            / 6.0
+            * 100
+        )
+        if weighted_score > 0
+        else 0.0,
+    )
+
+    # --------------------------------------------------------
+    # FINAL APPROVAL
+    # --------------------------------------------------------
+
+    approved = (
+        signal
+        in (
+            "BUY",
+            "SELL",
+        )
+        and confirmation.get(
+            "confirmed",
+            False,
+        )
+        and mtf_confidence
+        >= MIN_MTF_CONFIDENCE
+        and risk_reward
+        >= 1.25
+    )
+
+    # --------------------------------------------------------
+    # FINAL REASON
+    # --------------------------------------------------------
+
+    reason_parts = [
+        f"{signal} setup",
+        f"AI score {ai_score:.1f}",
+        f"MTF confidence {mtf_confidence:.1f}%",
+        "1h + 4h aligned",
+        f"R/R {risk_reward:.2f}",
+    ]
+
+    # Include entry-TF reasoning when available.
+    entry_reason = (
+        entry_tf.get(
+            "reason"
+        )
+    )
+
+    if entry_reason:
+
+        reason_parts.append(
+            f"15m: {entry_reason}"
+        )
+
+    # --------------------------------------------------------
+    # FINAL RESULT
+    # --------------------------------------------------------
+
+    return {
+        "symbol":
+            symbol,
+
+        "asset_class":
+            "METAL",
+
+        "signal":
+            signal,
+
+        "score":
+            round(
+                ai_score,
+                2,
+            ),
+
+        "raw_weighted_score":
+            round(
+                weighted_score,
+                3,
+            ),
+
+        "mtf_confidence":
+            round(
+                mtf_confidence,
+                2,
+            ),
+
+        "higher_tf_confirmed":
+            confirmation.get(
+                "confirmed",
+                False,
+            ),
+
+        "approved":
+            approved,
+
+        "entry_price":
+            entry_price,
+
+        "targets":
+            targets,
+
+        "risk_pct":
+            DEFAULT_METALS_RISK_PCT,
+
+        "risk_reward":
+            risk_reward,
+
+        "timeframes":
+            analyses,
+
+        "market_snapshot":
+            market_snapshot,
+
+        "quote":
+            quote,
+
+        "quote_fresh":
+            True,
+
+        "candles_fresh":
+            True,
+
+        "safety_gate":
+            True,
+
+        "scanner_state":
+            "READY",
+
+        "history_ready":
+            True,
+
+        "candle_readiness":
+            readiness,
+
+        "weighted_mtf":
+            weighted,
+
+        "higher_tf_confirmation":
+            confirmation,
+
+        "reason":
+            " | ".join(
+                reason_parts
+            ),
+    }
+
+
+# ============================================================
+# BACKWARD-COMPATIBLE SINGLE-MARKET ALIAS
+# ============================================================
+
+def scan_metal(
+    symbol: str,
+) -> Dict:
+
+    return scan_metal_market(
+        symbol
+    )
+
+
+# ============================================================
+# SCAN ALL METALS
+# ============================================================
+
+def scan_metals() -> List[Dict]:
+
+    results = []
+
+    for symbol in METAL_MARKETS:
+
+        try:
+
+            result = (
+                scan_metal_market(
+                    symbol
+                )
+            )
+
+        except Exception as error:
+
+            result = (
+                _no_trade_result(
+                    symbol,
+                    (
+                        "Scanner error: "
+                        f"{error}"
+                    ),
+                )
+            )
+
+            result[
+                "scanner_state"
+            ] = "ERROR"
+
+        results.append(
+            result
+        )
+
+    return results
+
+
+# ============================================================
+# BEST APPROVED SETUP
+# ============================================================
+
+def get_best_metals_setup(
+    results: Optional[List[Dict]] = None,
+) -> Optional[Dict]:
+
+    if results is None:
+
+        results = (
+            scan_metals()
+        )
+
+    approved = [
+        item
+        for item in results
+        if item.get(
+            "approved",
+            False,
+        )
+    ]
+
+    if not approved:
+
+        return None
+
+    approved.sort(
+        key=lambda item: (
+            _safe_float(
+                item.get(
+                    "score"
+                )
+            ),
+            _safe_float(
+                item.get(
+                    "mtf_confidence"
+                )
+            ),
+            _safe_float(
+                item.get(
+                    "risk_reward"
+                )
+            ),
+        ),
+        reverse=True,
+    )
+
+    return approved[
+        0
+    ]
+
+
+# ============================================================
+# STRONGEST MARKET
+# ============================================================
+
+def get_strongest_metals_market(
+    results: Optional[List[Dict]] = None,
+) -> Optional[Dict]:
+
+    if results is None:
+
+        results = (
+            scan_metals()
+        )
+
+    usable = [
+        item
+        for item in results
+        if item.get(
+            "scanner_state"
+        )
+        in (
+            "READY",
+            "WARMING_UP",
+        )
+    ]
+
+    if not usable:
+
+        return None
+
+    usable.sort(
+        key=lambda item: (
+            _safe_float(
+                item.get(
+                    "score"
+                )
+            ),
+            _safe_float(
+                item.get(
+                    "mtf_confidence"
+                )
+            ),
+        ),
+        reverse=True,
+    )
+
+    return usable[
+        0
+    ]
+
+
+# ============================================================
+# SCANNER SUMMARY
+# ============================================================
+
+def metals_scanner_summary(
+    results: Optional[List[Dict]] = None,
+) -> Dict:
+
+    if results is None:
+
+        results = (
+            scan_metals()
+        )
+
+    best_setup = (
+        get_best_metals_setup(
+            results
+        )
+    )
+
+    strongest = (
+        get_strongest_metals_market(
+            results
+        )
+    )
+
+    gold = next(
+        (
+            item
+            for item in results
+            if item.get(
+                "symbol"
+            ) == "XAUUSD"
+        ),
+        None,
+    )
+
+    silver = next(
+        (
+            item
+            for item in results
+            if item.get(
+                "symbol"
+            ) == "XAGUSD"
+        ),
+        None,
+    )
+
+    warming_up_count = sum(
+        1
+        for item in results
+        if item.get(
+            "scanner_state"
+        )
+        == "WARMING_UP"
+    )
+
+    ready_count = sum(
+        1
+        for item in results
+        if item.get(
+            "scanner_state"
+        )
+        == "READY"
+    )
+
+    approved_count = sum(
+        1
+        for item in results
+        if item.get(
+            "approved",
+            False,
+        )
+    )
+
+    error_count = sum(
+        1
+        for item in results
+        if item.get(
+            "scanner_state"
+        )
+        == "ERROR"
+    )
+
+    return {
+        "markets":
+            results,
+
+        "gold":
+            gold,
+
+        "silver":
+            silver,
+
+        "strongest_market":
+            strongest,
+
+        "best_setup":
+            best_setup,
+
+        "approved_count":
+            approved_count,
+
+        "ready_count":
+            ready_count,
+
+        "warming_up_count":
+            warming_up_count,
+
+        "error_count":
+            error_count,
+
+        "total_markets":
+            len(
+                results
+            ),
+
+        "execution_enabled":
+            False,
+
+        "real_orders_enabled":
+            False,
     }
 
 
@@ -1346,631 +2590,63 @@ def calculate_metals_position_size(
 
 
 # ============================================================
-# SCAN ONE METAL
+# WARM-UP STATUS
 # ============================================================
 
-def scan_metal(
-    symbol: str,
-) -> Dict:
-
-    symbol = (
-        str(symbol)
-        .upper()
-        .strip()
-    )
-
-    # --------------------------------------------------------
-    # SAFETY GATE 1:
-    # DIRECT PROVIDER QUOTE
-    # --------------------------------------------------------
-
-    quote = (
-        get_metal_quote(
-            symbol
-        )
-    )
-
-    if quote is None:
-
-        return _no_trade_result(
-            symbol,
-            "Live metals quote unavailable",
-        )
-
-    if not _quote_is_safe(
-        quote
-    ):
-
-        return _no_trade_result(
-            symbol,
-            (
-                "Metal quote is stale or "
-                "not safe for trading"
-            ),
-            quote=quote,
-        )
-
-    # --------------------------------------------------------
-    # BUILD MARKET SNAPSHOT
-    # --------------------------------------------------------
-
-    market_snapshot = (
-        build_metal_snapshot(
-            symbol
-        )
-    )
-
-    if market_snapshot.get(
-        "status"
-    ) != "LIVE":
-
-        return _no_trade_result(
-            symbol,
-            "Live metals market snapshot unavailable",
-            market_snapshot=market_snapshot,
-            quote=quote,
-        )
-
-    # --------------------------------------------------------
-    # SPREAD / MARKET QUALITY
-    # --------------------------------------------------------
-
-    if not market_snapshot.get(
-        "spread_ok",
-        True,
-    ):
-
-        return _no_trade_result(
-            symbol,
-            "Metal spread too wide",
-            market_snapshot=market_snapshot,
-            quote=quote,
-        )
-
-    # --------------------------------------------------------
-    # LOAD MTF CANDLES
-    # --------------------------------------------------------
-
-    mtf_data = (
-        get_metals_mtf_candles(
-            symbol
-        )
-    )
-
-    analyses = {}
-
-    for timeframe in TIMEFRAMES:
-
-        dataframe = (
-            mtf_data.get(
-                timeframe
-            )
-        )
-
-        analyses[
-            timeframe
-        ] = analyse_timeframe(
-            dataframe,
-            timeframe,
-        )
-
-    # --------------------------------------------------------
-    # SAFETY GATE 2:
-    # EVERY TIMEFRAME MUST BE VALID
-    # --------------------------------------------------------
-
-    all_timeframes_valid = all(
-        analyses.get(
-            timeframe,
-            {}
-        ).get(
-            "valid",
-            False,
-        )
-        for timeframe in TIMEFRAMES
-    )
-
-    if not all_timeframes_valid:
-
-        invalid = [
-            timeframe
-            for timeframe in TIMEFRAMES
-            if not analyses.get(
-                timeframe,
-                {}
-            ).get(
-                "valid",
-                False,
-            )
-        ]
-
-        return _no_trade_result(
-            symbol,
-            (
-                "Invalid metals timeframe data: "
-                + ", ".join(
-                    invalid
-                )
-            ),
-            market_snapshot=market_snapshot,
-            quote=quote,
-            timeframes=analyses,
-        )
-
-    # --------------------------------------------------------
-    # SAFETY GATE 3:
-    # CANDLES MUST BE FRESH
-    # --------------------------------------------------------
-
-    candle_quality = (
-        _check_candle_freshness(
-            symbol
-        )
-    )
-
-    candles_fresh = bool(
-        candle_quality.get(
-            "all_fresh",
-            False,
-        )
-    )
-
-    if not candles_fresh:
-
-        stale_frames = [
-            timeframe
-            for timeframe, info
-            in candle_quality.get(
-                "timeframes",
-                {}
-            ).items()
-            if not info.get(
-                "fresh",
-                False,
-            )
-        ]
-
-        result = _no_trade_result(
-            symbol,
-            (
-                "Metals candle data stale/unavailable: "
-                + ", ".join(
-                    stale_frames
-                )
-            ),
-            market_snapshot=market_snapshot,
-            quote=quote,
-            timeframes=analyses,
-        )
-
-        result[
-            "candle_quality"
-        ] = candle_quality
-
-        return result
-
-    # --------------------------------------------------------
-    # WEIGHTED SCORE
-    # --------------------------------------------------------
-
-    weighted_score = (
-        calculate_weighted_score(
-            analyses
-        )
-    )
-
-    # --------------------------------------------------------
-    # DIRECTION
-    # --------------------------------------------------------
-
-    if weighted_score >= MIN_ENTRY_SCORE:
-
-        signal = "BUY"
-
-    elif weighted_score <= -MIN_ENTRY_SCORE:
-
-        signal = "SELL"
-
-    else:
-
-        signal = "NO TRADE"
-
-    mtf_confidence = (
-        calculate_mtf_confidence(
-            analyses,
-            signal,
-        )
-        if signal != "NO TRADE"
-        else 0.0
-    )
-
-    # --------------------------------------------------------
-    # HIGHER TIMEFRAME CONFIRMATION
-    # --------------------------------------------------------
-
-    one_hour = analyses.get(
-        "1h",
-        {}
-    )
-
-    four_hour = analyses.get(
-        "4h",
-        {}
-    )
-
-    higher_tf_confirmed = False
-
-    if signal == "BUY":
-
-        higher_tf_confirmed = (
-            one_hour.get(
-                "direction"
-            ) == "BULLISH"
-            and
-            four_hour.get(
-                "direction"
-            ) == "BULLISH"
-        )
-
-    elif signal == "SELL":
-
-        higher_tf_confirmed = (
-            one_hour.get(
-                "direction"
-            ) == "BEARISH"
-            and
-            four_hour.get(
-                "direction"
-            ) == "BEARISH"
-        )
-
-    # --------------------------------------------------------
-    # FINAL SAFETY APPROVAL
-    # --------------------------------------------------------
-
-    approved = (
-        signal
-        in (
-            "BUY",
-            "SELL",
-        )
-        and mtf_confidence
-        >= MIN_MTF_CONFIDENCE
-        and higher_tf_confirmed
-        and all_timeframes_valid
-        and candles_fresh
-        and _quote_is_safe(
-            quote
-        )
-    )
-
-    entry_price = _safe_float(
-        quote.get(
-            "last"
-        )
-    )
-
-    fifteen_minute = analyses.get(
-        "15m",
-        {}
-    )
-
-    atr = _safe_float(
-        fifteen_minute.get(
-            "atr"
-        )
-    )
-
-    targets = {}
-
-    if approved:
-
-        targets = (
-            calculate_metals_targets(
-                symbol=symbol,
-                signal=signal,
-                entry_price=entry_price,
-                atr=atr,
-            )
-        )
-
-        if not targets.get(
-            "valid",
-            False,
-        ):
-
-            approved = False
-
-    # --------------------------------------------------------
-    # REASON
-    # --------------------------------------------------------
-
-    reasons = []
-
-    reasons.append(
-        f"Weighted score "
-        f"{weighted_score:+.2f}"
-    )
-
-    if signal != "NO TRADE":
-
-        reasons.append(
-            f"MTF confidence "
-            f"{mtf_confidence:.1f}%"
-        )
-
-    if higher_tf_confirmed:
-
-        reasons.append(
-            "1H + 4H confirmed"
-        )
-
-    elif signal != "NO TRADE":
-
-        reasons.append(
-            "Higher timeframe not aligned"
-        )
-
-    quality = market_snapshot.get(
-        "market_quality"
-    )
-
-    if quality:
-
-        reasons.append(
-            f"Market quality {quality}"
-        )
-
-    if candles_fresh:
-
-        reasons.append(
-            "Candles fresh"
-        )
-
-    if _quote_is_safe(
-        quote
-    ):
-
-        reasons.append(
-            "Quote fresh"
-        )
-
-    if signal == "NO TRADE":
-
-        reasons.append(
-            "Entry threshold not reached"
-        )
-
-    return {
-        "symbol":
-            symbol,
-
-        "asset_class":
-            "METAL",
-
-        "signal":
-            signal,
-
-        "score":
-            weighted_score,
-
-        "mtf_confidence":
-            mtf_confidence,
-
-        "higher_tf_confirmed":
-            higher_tf_confirmed,
-
-        "approved":
-            approved,
-
-        "entry_price":
-            entry_price,
-
-        "targets":
-            targets,
-
-        "risk_pct":
-            DEFAULT_METALS_RISK_PCT,
-
-        "timeframes":
-            analyses,
-
-        "market_snapshot":
-            market_snapshot,
-
-        "quote":
-            quote,
-
-        "quote_fresh":
-            True,
-
-        "candles_fresh":
-            candles_fresh,
-
-        "all_timeframes_valid":
-            all_timeframes_valid,
-
-        "candle_quality":
-            candle_quality,
-
-        "safety_gate":
-            (
-                candles_fresh
-                and all_timeframes_valid
-                and _quote_is_safe(
-                    quote
-                )
-            ),
-
-        "reason":
-            ", ".join(
-                reasons
-            ),
+def metals_scanner_warmup_status() -> Dict:
+
+    result = {
+        "markets": {},
+        "all_ready": True,
     }
-
-
-# ============================================================
-# SCAN GOLD + SILVER
-# ============================================================
-
-def scan_metals() -> List[Dict]:
-
-    results = []
 
     for symbol in METAL_MARKETS:
 
         try:
 
-            result = scan_metal(
-                symbol
+            readiness = (
+                get_metals_candle_readiness(
+                    symbol
+                )
             )
 
         except Exception as error:
 
-            result = _no_trade_result(
-                symbol,
-                f"Scanner error: {error}",
-            )
+            readiness = {
+                "symbol":
+                    symbol,
 
-        results.append(
-            result
-        )
+                "ready":
+                    False,
 
-    return results
+                "state":
+                    "ERROR",
 
+                "reason":
+                    str(
+                        error
+                    ),
 
-# ============================================================
-# BEST METALS SETUP
-# ============================================================
+                "timeframes":
+                    {},
+            }
 
-def get_best_metals_setup(
-    results: Optional[List[Dict]] = None,
-) -> Optional[Dict]:
+        result[
+            "markets"
+        ][
+            symbol
+        ] = readiness
 
-    if results is None:
-
-        results = scan_metals()
-
-    approved = [
-        item
-        for item in results
-        if (
-            item.get(
-                "approved",
-                False,
-            )
-            and
-            item.get(
-                "safety_gate",
-                False,
-            )
-        )
-    ]
-
-    if not approved:
-
-        return None
-
-    approved.sort(
-        key=lambda item: (
-            item.get(
-                "mtf_confidence",
-                0.0,
-            ),
-            abs(
-                item.get(
-                    "score",
-                    0.0,
-                )
-            ),
-        ),
-        reverse=True,
-    )
-
-    return approved[
-        0
-    ]
-
-
-# ============================================================
-# SCANNER SUMMARY
-# ============================================================
-
-def metals_scanner_summary(
-    results: Optional[List[Dict]] = None,
-) -> Dict:
-
-    if results is None:
-
-        results = scan_metals()
-
-    best = get_best_metals_setup(
-        results
-    )
-
-    gold = next(
-        (
-            item
-            for item in results
-            if item.get(
-                "symbol"
-            ) == "XAUUSD"
-        ),
-        None,
-    )
-
-    silver = next(
-        (
-            item
-            for item in results
-            if item.get(
-                "symbol"
-            ) == "XAGUSD"
-        ),
-        None,
-    )
-
-    return {
-        "markets":
-            results,
-
-        "gold":
-            gold,
-
-        "silver":
-            silver,
-
-        "best_setup":
-            best,
-
-        "approved_count":
-            sum(
-                1
-                for item in results
-                if (
-                    item.get(
-                        "approved",
-                        False,
-                    )
-                    and
-                    item.get(
-                        "safety_gate",
-                        False,
-                    )
-                )
-            ),
-
-        "total_markets":
-            len(
-                results
-            ),
-
-        "execution_enabled":
+        if not readiness.get(
+            "ready",
             False,
+        ):
 
-        "real_orders_enabled":
-            False,
-    }
+            result[
+                "all_ready"
+            ] = False
+
+    return result
 
 
 # ============================================================
@@ -1981,50 +2657,79 @@ def metals_scanner_health() -> Dict:
 
     try:
 
-        results = scan_metals()
+        results = (
+            scan_metals()
+        )
 
-        valid_markets = sum(
-            1
-            for item in results
-            if not str(
-                item.get(
-                    "reason",
-                    ""
-                )
-            ).startswith(
-                "Scanner error"
+        summary = (
+            metals_scanner_summary(
+                results
             )
         )
 
-        safe_markets = sum(
-            1
+        warmup = (
+            metals_scanner_warmup_status()
+        )
+
+        hard_errors = [
+            item
             for item in results
             if item.get(
-                "safety_gate",
-                False,
+                "scanner_state"
             )
-        )
+            == "ERROR"
+        ]
 
         return {
             "ok":
-                valid_markets > 0,
+                len(
+                    hard_errors
+                )
+                == 0,
 
             "engine":
-                "V3.7 Metals Safety Scanner",
+                "V3.8 Metals Scanner",
+
+            "provider":
+                "Gold-API + LOCAL_POSTGRES_OHLC",
 
             "markets":
                 len(
                     results
                 ),
 
-            "valid_markets":
-                valid_markets,
+            "ready_markets":
+                summary.get(
+                    "ready_count",
+                    0,
+                ),
 
-            "safe_markets":
-                safe_markets,
+            "warming_up_markets":
+                summary.get(
+                    "warming_up_count",
+                    0,
+                ),
+
+            "approved_markets":
+                summary.get(
+                    "approved_count",
+                    0,
+                ),
+
+            "errors":
+                summary.get(
+                    "error_count",
+                    0,
+                ),
+
+            "all_history_ready":
+                warmup.get(
+                    "all_ready",
+                    False,
+                ),
 
             "paper_execution":
-                False,
+                True,
 
             "real_execution":
                 False,
@@ -2037,10 +2742,46 @@ def metals_scanner_health() -> Dict:
                 False,
 
             "engine":
-                "V3.7 Metals Safety Scanner",
+                "V3.8 Metals Scanner",
+
+            "provider":
+                "Gold-API + LOCAL_POSTGRES_OHLC",
 
             "reason":
                 str(
                     error
                 ),
+
+            "paper_execution":
+                True,
+
+            "real_execution":
+                False,
         }
+
+
+# ============================================================
+# SAFE DEBUG SNAPSHOT
+# ============================================================
+
+def debug_metals_scanner() -> Dict:
+
+    results = (
+        scan_metals()
+    )
+
+    return {
+        "summary":
+            metals_scanner_summary(
+                results
+            ),
+
+        "warmup":
+            metals_scanner_warmup_status(),
+
+        "health":
+            metals_scanner_health(),
+
+        "real_orders":
+            False,
+    }
