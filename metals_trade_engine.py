@@ -1,8 +1,9 @@
 """
 metals_trade_engine.py
 
-PRO AI QUANT TERMINAL V4.0
+PRO AI QUANT TERMINAL V4.1
 INSTITUTIONAL-SAFE METALS PAPER EXECUTION ENGINE
+WITH UNIFIED PORTFOLIO RISK GOVERNOR
 
 Markets
 -------
@@ -19,6 +20,7 @@ Purpose
 - Monitor metals TP / SL using fresh live prices
 - Apply cooldown after metals trade closes
 - Block duplicate / stale / warming-up execution
+- Require central Portfolio Risk Governor approval
 - PAPER TRADING ONLY
 - REAL METALS ORDERS HARD-LOCKED
 
@@ -28,6 +30,7 @@ Designed for:
 - metals_scanner.py V3.8+
 - metals_provider.py Gold-API layer
 - metals_ohlc_store.py V3.9
+- portfolio_risk_governor.py V4
 - PaperTrader multi-slot PostgreSQL engine
 """
 
@@ -48,6 +51,10 @@ from metals_provider import (
 
 from paper_trader import (
     METALS_SLOT,
+)
+
+from portfolio_risk_governor import (
+    authorize_trade,
 )
 
 
@@ -177,7 +184,6 @@ def _quote_is_safe(
 ) -> bool:
 
     if not quote:
-
         return False
 
     price = _safe_float(
@@ -190,28 +196,24 @@ def _quote_is_safe(
         price is None
         or price <= 0
     ):
-
         return False
 
     if quote.get(
         "stale",
         False,
     ):
-
         return False
 
     if quote.get(
         "data_fresh",
         True,
     ) is False:
-
         return False
 
     if quote.get(
         "tradable_data",
         True,
     ) is False:
-
         return False
 
     return True
@@ -226,7 +228,6 @@ def get_safe_metals_quote(
     )
 
     if symbol not in SUPPORTED_METALS:
-
         return None
 
     try:
@@ -248,7 +249,6 @@ def get_safe_metals_quote(
     if not _quote_is_safe(
         quote
     ):
-
         return None
 
     return quote
@@ -263,7 +263,6 @@ def get_metals_current_price(
     )
 
     if not quote:
-
         return None
 
     return _safe_float(
@@ -290,7 +289,6 @@ def _all_scanner_timeframes_valid(
         timeframes,
         dict,
     ):
-
         return False
 
     for timeframe in (
@@ -308,7 +306,6 @@ def _all_scanner_timeframes_valid(
             "valid",
             False,
         ):
-
             return False
 
     return True
@@ -586,10 +583,6 @@ def validate_metals_setup(
         )
     ).upper().strip()
 
-    # --------------------------------------------------------
-    # SYMBOL
-    # --------------------------------------------------------
-
     if symbol not in SUPPORTED_METALS:
 
         return {
@@ -599,10 +592,6 @@ def validate_metals_setup(
             "reason":
                 "Unsupported metals symbol",
         }
-
-    # --------------------------------------------------------
-    # SCANNER STATE
-    # --------------------------------------------------------
 
     scanner_state = str(
         setup.get(
@@ -636,10 +625,6 @@ def validate_metals_setup(
             "reason":
                 "Historical MTF candles not ready",
         }
-
-    # --------------------------------------------------------
-    # SIGNAL APPROVAL
-    # --------------------------------------------------------
 
     if signal not in (
         "BUY",
@@ -680,10 +665,6 @@ def validate_metals_setup(
                 "Scanner safety gate failed",
         }
 
-    # --------------------------------------------------------
-    # DATA FRESHNESS
-    # --------------------------------------------------------
-
     if not setup.get(
         "quote_fresh",
         False,
@@ -722,10 +703,6 @@ def validate_metals_setup(
                 "15m/1h/4h scanner data not fully valid",
         }
 
-    # --------------------------------------------------------
-    # HIGHER TIMEFRAME CONFIRMATION
-    # --------------------------------------------------------
-
     if not setup.get(
         "higher_tf_confirmed",
         False,
@@ -761,10 +738,6 @@ def validate_metals_setup(
                     f"{MIN_METALS_MTF_CONFIDENCE:.1f}%"
                 ),
         }
-
-    # --------------------------------------------------------
-    # TRADE PARAMETERS
-    # --------------------------------------------------------
 
     scanner_entry = _safe_float(
         setup.get(
@@ -832,10 +805,6 @@ def validate_metals_setup(
                 ),
         }
 
-    # --------------------------------------------------------
-    # TP / SL STRUCTURE
-    # --------------------------------------------------------
-
     if signal == "BUY":
 
         valid_structure = (
@@ -861,10 +830,6 @@ def validate_metals_setup(
             "reason":
                 "Invalid metals TP/SL structure",
         }
-
-    # --------------------------------------------------------
-    # FINAL LIVE EXECUTION QUOTE
-    # --------------------------------------------------------
 
     quote = get_safe_metals_quote(
         symbol
@@ -1073,10 +1038,6 @@ def open_metals_trade(
     risk_pct: float = DEFAULT_METALS_RISK_PCT,
 ) -> Dict:
 
-    # --------------------------------------------------------
-    # HARD REAL ORDER LOCK
-    # --------------------------------------------------------
-
     if (
         REAL_METALS_ORDERS_ENABLED
         or not PAPER_ONLY
@@ -1092,10 +1053,6 @@ def open_metals_trade(
             "real_orders":
                 False,
         }
-
-    # --------------------------------------------------------
-    # EXISTING POSITION
-    # --------------------------------------------------------
 
     if not trader.slot_available(
         METALS_SLOT
@@ -1117,10 +1074,6 @@ def open_metals_trade(
                 False,
         }
 
-    # --------------------------------------------------------
-    # COOLDOWN
-    # --------------------------------------------------------
-
     cooldown = get_metals_cooldown_status(
         trader
     )
@@ -1135,9 +1088,7 @@ def open_metals_trade(
                 "COOLDOWN",
 
             "reason":
-                (
-                    "Metals trade cooldown active"
-                ),
+                "Metals trade cooldown active",
 
             "cooldown":
                 cooldown,
@@ -1145,10 +1096,6 @@ def open_metals_trade(
             "real_orders":
                 False,
         }
-
-    # --------------------------------------------------------
-    # VALIDATE SCANNER SETUP
-    # --------------------------------------------------------
 
     validation = validate_metals_setup(
         setup
@@ -1172,10 +1119,6 @@ def open_metals_trade(
             "real_orders":
                 False,
         }
-
-    # --------------------------------------------------------
-    # LIVE TARGET REBUILD
-    # --------------------------------------------------------
 
     rebuilt = _rebuild_targets_from_live_price(
         validation
@@ -1219,10 +1162,6 @@ def open_metals_trade(
         "stop_loss"
     ]
 
-    # --------------------------------------------------------
-    # RISK PERCENTAGE
-    # --------------------------------------------------------
-
     risk_pct = _safe_float(
         risk_pct
     )
@@ -1248,10 +1187,6 @@ def open_metals_trade(
         MAX_METALS_RISK_PCT,
     )
 
-    # --------------------------------------------------------
-    # ACCOUNT BALANCE
-    # --------------------------------------------------------
-
     balance = _safe_float(
         trader.get_balance()
     )
@@ -1271,10 +1206,6 @@ def open_metals_trade(
             "real_orders":
                 False,
         }
-
-    # --------------------------------------------------------
-    # POSITION SIZE
-    # --------------------------------------------------------
 
     quantity = calculate_metals_position_size(
         account_balance=balance,
@@ -1296,9 +1227,45 @@ def open_metals_trade(
                 False,
         }
 
-    # --------------------------------------------------------
+    # ========================================================
+    # CENTRAL PORTFOLIO RISK GOVERNOR AUTHORIZATION
+    # ========================================================
+
+    governor = authorize_trade(
+        trader,
+        asset_class="METAL",
+        symbol=symbol,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        quantity=quantity,
+        risk_pct=risk_pct,
+    )
+
+    if not governor.get(
+        "approved",
+        False,
+    ):
+
+        return {
+            "status":
+                "RISK_BLOCKED",
+
+            "reason":
+                governor.get(
+                    "reason",
+                    "Portfolio Risk Governor blocked trade",
+                ),
+
+            "governor":
+                governor,
+
+            "real_orders":
+                False,
+        }
+
+    # ========================================================
     # FINAL SLOT RECHECK
-    # --------------------------------------------------------
+    # ========================================================
 
     if not trader.slot_available(
         METALS_SLOT
@@ -1315,9 +1282,9 @@ def open_metals_trade(
                 False,
         }
 
-    # --------------------------------------------------------
+    # ========================================================
     # PAPER EXECUTION ONLY
-    # --------------------------------------------------------
+    # ========================================================
 
     result = trader.open_trade(
         symbol=symbol,
@@ -1390,6 +1357,14 @@ def open_metals_trade(
     ] = True
 
     result[
+        "governor"
+    ] = governor
+
+    result[
+        "portfolio_risk_approved"
+    ] = True
+
+    result[
         "paper_trade"
     ] = True
 
@@ -1416,10 +1391,6 @@ def run_metals_cycle(
     trader,
     risk_pct: float = DEFAULT_METALS_RISK_PCT,
 ) -> Dict:
-
-    # --------------------------------------------------------
-    # 1. MANAGE EXISTING POSITION FIRST
-    # --------------------------------------------------------
 
     existing = trader.get_position(
         METALS_SLOT
@@ -1456,10 +1427,6 @@ def run_metals_cycle(
                 False,
         }
 
-    # --------------------------------------------------------
-    # 2. COOLDOWN
-    # --------------------------------------------------------
-
     cooldown = get_metals_cooldown_status(
         trader
     )
@@ -1492,15 +1459,7 @@ def run_metals_cycle(
                 False,
         }
 
-    # --------------------------------------------------------
-    # 3. SCAN GOLD + SILVER
-    # --------------------------------------------------------
-
     results = scan_metals()
-
-    # --------------------------------------------------------
-    # 4. DETECT WARM-UP
-    # --------------------------------------------------------
 
     warming = [
         item
@@ -1551,10 +1510,6 @@ def run_metals_cycle(
                 False,
         }
 
-    # --------------------------------------------------------
-    # 5. FIND BEST APPROVED SETUP
-    # --------------------------------------------------------
-
     best_setup = get_best_metals_setup(
         results
     )
@@ -1580,10 +1535,6 @@ def run_metals_cycle(
             "real_orders":
                 False,
         }
-
-    # --------------------------------------------------------
-    # 6. FINAL EXECUTION VALIDATION
-    # --------------------------------------------------------
 
     validation = validate_metals_setup(
         best_setup
@@ -1618,10 +1569,6 @@ def run_metals_cycle(
             "real_orders":
                 False,
         }
-
-    # --------------------------------------------------------
-    # 7. OPEN PAPER POSITION
-    # --------------------------------------------------------
 
     execution = open_metals_trade(
         trader=trader,
@@ -1761,7 +1708,10 @@ def metals_trade_engine_health(
             True,
 
         "engine":
-            "V4.0 Metals Paper Execution",
+            "V4.1 Metals Paper Execution",
+
+        "portfolio_governor":
+            True,
 
         "paper_only":
             True,
