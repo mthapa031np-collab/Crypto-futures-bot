@@ -1,2216 +1,7 @@
-"""
-app.py
-
-PRO AI QUANT TERMINAL V3.5
-
-CRYPTO + METALS PARALLEL PAPER TRADING PLATFORM
-WITH V3 CENTRAL CONTROL CENTER
-
-Architecture
-------------
-CRYPTO_MAIN
-    - Autonomous crypto scanner
-    - Multi-timeframe confirmation
-    - Maximum 1 Crypto position
-
-METALS_MAIN
-    - Gold XAUUSD
-    - Silver XAGUSD
-    - 15m / 1h / 4h MTF
-    - ATR-based TP / SL
-    - Maximum 1 Metals position
-
-CONTROL CENTER
-    - Persistent PostgreSQL-backed settings
-    - Crypto / Metals controls
-    - Risk configuration
-    - Scanner configuration
-    - System health
-    - API readiness
-    - Live execution hard lock
-
-TOTAL MAX POSITIONS
-    1 Crypto + 1 Metal
-
-IMPORTANT
----------
-PAPER TRADING ONLY
-REAL ORDERS DISABLED
-"""
-
-from datetime import datetime, timezone
-
-import pandas as pd
-import streamlit as st
-
-
 # ============================================================
-# CORE SETTINGS
-# ============================================================
-
-from settings import (
-    PAPER_TRADING,
-    PAPER_BALANCE,
-    RISK_PCT,
-    POLL_SECONDS,
-    MAX_DAILY_LOSS_PCT,
-    SCAN_MARKETS,
-    TEST_MODE,
-)
-
-
-# ============================================================
-# CRYPTO DATA / ENGINE
-# ============================================================
-
-from market_data import (
-    get_ticker,
-    get_candles,
-)
-
-from scanner import (
-    scan_markets,
-    scanner_summary,
-)
-
-from strategy_engine import (
-    confirm_scanner_setup,
-)
-
-from trade_engine import (
-    monitor_open_position,
-    open_approved_trade,
-    get_current_price,
-)
-
-
-# ============================================================
-# PAPER PORTFOLIO
-# ============================================================
-
-from paper_trader import (
-    PaperTrader,
-    CRYPTO_SLOT,
-    METALS_SLOT,
-)
-
-
-# ============================================================
-# V3 ANALYTICS
-# ============================================================
-
-from analytics_engine import (
-    detect_market_regime,
-    calculate_momentum,
-    correlation_matrix,
-    scanner_intelligence,
-    trade_statistics,
-)
-
-
-# ============================================================
-# V3 UI
-# ============================================================
-
-from ui_v3 import (
-    inject_v3_css,
-    render_header,
-    render_market_strip,
-    render_top_metrics,
-    render_intelligence_cards,
-    render_ai_core,
-    render_scanner,
-    render_trade_analytics,
-)
-
-
-# ============================================================
-# METALS
-# ============================================================
-
-from metals_dashboard import (
-    render_metals_dashboard,
-)
-
-from metals_trade_engine import (
-    run_metals_cycle,
-    get_metals_current_price,
-)
-
-
-# ============================================================
-# V3 CONTROL CENTER
-# ============================================================
-
-from control_center_ui import (
-    render_control_center,
-)
-
-
-# ============================================================
-# PAGE CONFIG
-# ============================================================
-
-st.set_page_config(
-    page_title="PRO AI QUANT TERMINAL V3.5",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
-inject_v3_css()
-
-
-# ============================================================
-# PLATFORM CONSTANTS
-# ============================================================
-
-METALS_SCAN_SECONDS = 300
-
-
-NAV_ITEMS = [
-    "Overview",
-    "Crypto",
-    "Metals",
-    "Positions",
-    "Scanner",
-    "Analytics",
-    "Settings",
-]
-
-
-# ============================================================
-# SESSION STATE
-# ============================================================
-
-def init_state():
-
-    defaults = {
-        # Navigation
-        "selected_asset_class": "Overview",
-        "chart_pair": "BTCUSDT",
-
-        # Legacy/runtime pause
-        "bot_paused": False,
-
-        # Crypto engine
-        "crypto_scanner_results": [],
-        "crypto_strategy_result": None,
-        "crypto_status": "STARTING",
-        "crypto_market": "—",
-        "crypto_signal": "NO TRADE",
-        "crypto_score": 0.0,
-        "crypto_confidence": 0.0,
-        "crypto_reason": "",
-
-        # Metals engine
-        "metals_status": "STARTING",
-        "metals_scanner_results": [],
-        "metals_best_setup": None,
-        "metals_last_scan_at": None,
-
-        # General
-        "last_update": None,
-        "bot_error": None,
-
-        # Daily risk state
-        "day_start_date": None,
-        "day_start_balance": PAPER_BALANCE,
-        "trading_paused_by_risk": False,
-        "current_drawdown": 0.0,
-    }
-
-    for key, value in defaults.items():
-
-        if key not in st.session_state:
-
-            st.session_state[
-                key
-            ] = value
-
-    if "paper_trader" not in st.session_state:
-
-        st.session_state.paper_trader = (
-            PaperTrader(
-                starting_balance=PAPER_BALANCE
-            )
-        )
-
-
-init_state()
-
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def utc_now():
-
-    return datetime.now(
-        timezone.utc
-    )
-
-
-def safe_float(
-    value,
-    default=0.0,
-):
-
-    try:
-
-        if value is None:
-            return default
-
-        return float(
-            value
-        )
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-
-        return default
-
-
-# ============================================================
-# DAILY PORTFOLIO RISK
-# ============================================================
-
-def update_daily_risk():
-
-    trader = (
-        st.session_state.paper_trader
-    )
-
-    balance = (
-        trader.get_balance()
-    )
-
-    today = (
-        utc_now().date()
-    )
-
-    if (
-        st.session_state.day_start_date
-        != today
-    ):
-
-        st.session_state.day_start_date = (
-            today
-        )
-
-        st.session_state.day_start_balance = (
-            balance
-        )
-
-        st.session_state.trading_paused_by_risk = (
-            False
-        )
-
-    start_balance = safe_float(
-        st.session_state.day_start_balance,
-        PAPER_BALANCE,
-    )
-
-    drawdown = 0.0
-
-    if start_balance > 0:
-
-        drawdown = (
-            (
-                start_balance
-                - balance
-            )
-            / start_balance
-            * 100
-        )
-
-    st.session_state.current_drawdown = (
-        drawdown
-    )
-
-    if (
-        drawdown
-        >= MAX_DAILY_LOSS_PCT
-    ):
-
-        st.session_state.trading_paused_by_risk = (
-            True
-        )
-
-    return drawdown
-
-
-# ============================================================
-# CRYPTO MARKET ANALYTICS
-# ============================================================
-
-def get_regime_data(
-    symbol,
-):
-
-    try:
-
-        candles = get_candles(
-            exchange="PUBLIC",
-            symbol=symbol,
-            timeframe_minutes=15,
-            limit=100,
-            api_key="",
-            api_secret="",
-            use_testnet=False,
-        )
-
-        if (
-            candles is None
-            or len(candles) < 50
-        ):
-
-            return {
-                "regime": "UNKNOWN",
-                "trend": "UNKNOWN",
-                "atr_pct": 0.0,
-                "momentum": 0.0,
-            }
-
-        regime = (
-            detect_market_regime(
-                candles
-            )
-        )
-
-        momentum = (
-            calculate_momentum(
-                candles
-            )
-        )
-
-        return {
-            "regime":
-                regime.get(
-                    "regime",
-                    "UNKNOWN",
-                ),
-
-            "trend":
-                regime.get(
-                    "trend",
-                    "UNKNOWN",
-                ),
-
-            "atr_pct":
-                safe_float(
-                    regime.get(
-                        "atr_pct"
-                    )
-                ),
-
-            "momentum":
-                safe_float(
-                    momentum
-                ),
-        }
-
-    except Exception as error:
-
-        print(
-            "[REGIME ERROR] "
-            f"{symbol}: {error}",
-            flush=True,
-        )
-
-        return {
-            "regime": "UNKNOWN",
-            "trend": "UNKNOWN",
-            "atr_pct": 0.0,
-            "momentum": 0.0,
-        }
-
-
-# ============================================================
-# CRYPTO CORRELATION
-# ============================================================
-
-@st.cache_data(
-    ttl=900,
-    show_spinner=False,
-)
-def build_crypto_correlation():
-
-    candle_map = {}
-
-    for symbol in SCAN_MARKETS:
-
-        try:
-
-            candles = get_candles(
-                exchange="PUBLIC",
-                symbol=symbol,
-                timeframe_minutes=15,
-                limit=80,
-                api_key="",
-                api_secret="",
-                use_testnet=False,
-            )
-
-            if candles is not None:
-
-                candle_map[
-                    symbol
-                ] = candles
-
-        except Exception:
-
-            continue
-
-    return correlation_matrix(
-        candle_map
-    )
-
-
-# ============================================================
-# CRYPTO BOT CYCLE
-# ============================================================
-
-def run_crypto_cycle():
-
-    trader = (
-        st.session_state.paper_trader
-    )
-
-    now = (
-        utc_now()
-    )
-
-    try:
-
-        # ----------------------------------------------------
-        # MANAGE EXISTING CRYPTO POSITION FIRST
-        # ----------------------------------------------------
-
-        crypto_position = (
-            trader.get_position(
-                CRYPTO_SLOT
-            )
-        )
-
-        if crypto_position:
-
-            st.session_state.crypto_market = (
-                crypto_position.get(
-                    "symbol",
-                    "—",
-                )
-            )
-
-            result = (
-                monitor_open_position(
-                    trader
-                )
-            )
-
-            if result is None:
-
-                st.session_state.crypto_status = (
-                    "POSITION MONITORING"
-                )
-
-            else:
-
-                status = (
-                    result.get(
-                        "status"
-                    )
-                )
-
-                if status == "CLOSED":
-
-                    st.session_state.crypto_status = (
-                        "TRADE CLOSED"
-                    )
-
-                    st.session_state.crypto_signal = (
-                        "NO TRADE"
-                    )
-
-                    st.session_state.crypto_score = (
-                        0.0
-                    )
-
-                    st.session_state.crypto_confidence = (
-                        0.0
-                    )
-
-                elif status == "OPEN":
-
-                    st.session_state.crypto_status = (
-                        "POSITION OPEN"
-                    )
-
-                else:
-
-                    st.session_state.crypto_status = (
-                        status
-                        or "POSITION MONITORING"
-                    )
-
-            return
-
-        # ----------------------------------------------------
-        # PAUSE
-        # ----------------------------------------------------
-
-        if st.session_state.bot_paused:
-
-            st.session_state.crypto_status = (
-                "PAUSED"
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # DAILY LOSS PROTECTION
-        # ----------------------------------------------------
-
-        if (
-            st.session_state
-            .trading_paused_by_risk
-        ):
-
-            st.session_state.crypto_status = (
-                "DAILY LOSS LIMIT HIT"
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # MULTI-MARKET SCANNER
-        # ----------------------------------------------------
-
-        st.session_state.crypto_status = (
-            f"SCANNING "
-            f"{len(SCAN_MARKETS)} MARKETS"
-        )
-
-        results = (
-            scan_markets()
-        )
-
-        st.session_state.crypto_scanner_results = (
-            results
-        )
-
-        summary = scanner_summary(
-            results
-        )
-
-        strongest = (
-            summary.get(
-                "strongest_market"
-            )
-        )
-
-        best_setup = (
-            summary.get(
-                "best_setup"
-            )
-        )
-
-        # ----------------------------------------------------
-        # STRONGEST MARKET INFO
-        # ----------------------------------------------------
-
-        if strongest:
-
-            st.session_state.crypto_market = (
-                strongest.get(
-                    "symbol",
-                    "—",
-                )
-            )
-
-            st.session_state.crypto_signal = (
-                strongest.get(
-                    "signal",
-                    "NO TRADE",
-                )
-            )
-
-            st.session_state.crypto_score = (
-                safe_float(
-                    strongest.get(
-                        "score"
-                    )
-                )
-            )
-
-            st.session_state.crypto_reason = (
-                strongest.get(
-                    "reason",
-                    "",
-                )
-            )
-
-        # ----------------------------------------------------
-        # NO SETUP
-        # ----------------------------------------------------
-
-        if best_setup is None:
-
-            st.session_state.crypto_status = (
-                "NO QUALIFYING TRADE"
-            )
-
-            st.session_state.crypto_confidence = (
-                0.0
-            )
-
-            st.session_state.crypto_strategy_result = (
-                None
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # MULTI-TIMEFRAME CONFIRMATION
-        # ----------------------------------------------------
-
-        confirmation = (
-            confirm_scanner_setup(
-                best_setup
-            )
-        )
-
-        st.session_state.crypto_strategy_result = (
-            confirmation
-        )
-
-        st.session_state.crypto_market = (
-            best_setup.get(
-                "symbol",
-                "—",
-            )
-        )
-
-        st.session_state.crypto_signal = (
-            best_setup.get(
-                "signal",
-                "NO TRADE",
-            )
-        )
-
-        st.session_state.crypto_score = (
-            safe_float(
-                best_setup.get(
-                    "score"
-                )
-            )
-        )
-
-        st.session_state.crypto_confidence = (
-            safe_float(
-                confirmation.get(
-                    "confidence"
-                )
-            )
-        )
-
-        st.session_state.crypto_reason = (
-            confirmation.get(
-                "reason",
-                "",
-            )
-        )
-
-        if not confirmation.get(
-            "approved",
-            False,
-        ):
-
-            st.session_state.crypto_status = (
-                "WAITING FOR MTF CONFIRMATION"
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # PAPER EXECUTION
-        # ----------------------------------------------------
-
-        execution = (
-            open_approved_trade(
-                trader=trader,
-                setup=dict(
-                    best_setup
-                ),
-            )
-        )
-
-        status = (
-            execution.get(
-                "status",
-                "UNKNOWN",
-            )
-        )
-
-        if status == "EXECUTED":
-
-            st.session_state.crypto_status = (
-                "PAPER TRADE OPENED"
-            )
-
-        elif status == "REJECTED":
-
-            st.session_state.crypto_status = (
-                "TRADE REJECTED BY RISK"
-            )
-
-        else:
-
-            st.session_state.crypto_status = (
-                "TRADE SKIPPED"
-            )
-
-    except Exception as error:
-
-        st.session_state.crypto_status = (
-            "ERROR"
-        )
-
-        st.session_state.bot_error = (
-            f"Crypto: {error}"
-        )
-
-    finally:
-
-        st.session_state.last_update = (
-            now.isoformat()
-        )
-
-
-# ============================================================
-# METALS SCAN TIMING
-# ============================================================
-
-def metals_scan_due():
-
-    last_value = (
-        st.session_state
-        .metals_last_scan_at
-    )
-
-    if not last_value:
-
-        return True
-
-    try:
-
-        last = (
-            datetime.fromisoformat(
-                last_value
-            )
-        )
-
-        age = (
-            utc_now()
-            - last
-        ).total_seconds()
-
-        return (
-            age
-            >= METALS_SCAN_SECONDS
-        )
-
-    except Exception:
-
-        return True
-
-
-# ============================================================
-# PARALLEL METALS CYCLE
-# ============================================================
-
-def run_parallel_metals_cycle():
-
-    trader = (
-        st.session_state.paper_trader
-    )
-
-    # --------------------------------------------------------
-    # EXISTING METALS POSITION
-    # --------------------------------------------------------
-
-    metals_position = (
-        trader.get_position(
-            METALS_SLOT
-        )
-    )
-
-    if metals_position:
-
-        result = run_metals_cycle(
-            trader=trader,
-            risk_pct=1.0,
-        )
-
-        st.session_state.metals_status = (
-            result.get(
-                "status",
-                "MANAGING_POSITION",
-            )
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # PAUSE
-    # --------------------------------------------------------
-
-    if st.session_state.bot_paused:
-
-        st.session_state.metals_status = (
-            "PAUSED"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # DAILY LOSS PROTECTION
-    # --------------------------------------------------------
-
-    if (
-        st.session_state
-        .trading_paused_by_risk
-    ):
-
-        st.session_state.metals_status = (
-            "DAILY LOSS LIMIT HIT"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # WAIT UNTIL NEXT METALS SCAN
-    # --------------------------------------------------------
-
-    if not metals_scan_due():
-
-        st.session_state.metals_status = (
-            "WAITING FOR NEXT METALS SCAN"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # SCAN + EXECUTE
-    # --------------------------------------------------------
-
-    try:
-
-        result = run_metals_cycle(
-            trader=trader,
-            risk_pct=1.0,
-        )
-
-        st.session_state.metals_last_scan_at = (
-            utc_now().isoformat()
-        )
-
-        st.session_state.metals_status = (
-            result.get(
-                "status",
-                "UNKNOWN",
-            )
-        )
-
-        st.session_state.metals_scanner_results = (
-            result.get(
-                "scanner_results",
-                [],
-            )
-        )
-
-        st.session_state.metals_best_setup = (
-            result.get(
-                "best_setup"
-            )
-        )
-
-    except Exception as error:
-
-        st.session_state.metals_status = (
-            "ERROR"
-        )
-
-        st.session_state.bot_error = (
-            f"Metals: {error}"
-        )
-
-
-# ============================================================
-# HEADER
-# ============================================================
-
-render_header(
-    utc_now().strftime(
-        "%H:%M:%S UTC"
-    )
-)
-
-
-# ============================================================
-# MAIN NAVIGATION
-# ============================================================
-
-selected_page = st.radio(
-    "Navigation",
-    NAV_ITEMS,
-    key="selected_asset_class",
-    horizontal=True,
-    label_visibility="collapsed",
-)
-
-
-# ============================================================
-# STABLE CRYPTO CHART
-# ============================================================
-
-@st.fragment
-def stable_crypto_chart():
-
-    if selected_page not in (
-        "Overview",
-        "Crypto",
-    ):
-
-        return
-
-    left, right = (
-        st.columns(
-            [
-                1,
-                3,
-            ]
-        )
-    )
-
-    with left:
-
-        symbol = st.selectbox(
-            "Crypto Market",
-            SCAN_MARKETS,
-            key="chart_pair",
-        )
-
-        st.caption(
-            "Isolated chart • "
-            "does not refresh with bot cycle"
-        )
-
-    ticker = get_ticker(
-        symbol=symbol,
-        exchange="PUBLIC",
-        api_key="",
-        api_secret="",
-        use_testnet=False,
-    )
-
-    last = 0.0
-    change = 0.0
-    high = 0.0
-    low = 0.0
-
-    if ticker:
-
-        last = safe_float(
-            ticker.get(
-                "last"
-            )
-        )
-
-        change = safe_float(
-            ticker.get(
-                "change_pct"
-            )
-        )
-
-        high = safe_float(
-            ticker.get(
-                "high"
-            )
-        )
-
-        low = safe_float(
-            ticker.get(
-                "low"
-            )
-        )
-
-    with right:
-
-        st.caption(
-            f"{symbol} • "
-            f"${last:,.6f} • "
-            f"{change:+.2f}% • "
-            f"H ${high:,.6f} • "
-            f"L ${low:,.6f}"
-        )
-
-    base = (
-        symbol.replace(
-            "USDT",
-            "",
-        )
-    )
-
-    tv_symbol = (
-        f"COINBASE:{base}USD"
-    )
-
-    chart_html = f"""
-    <!DOCTYPE html>
-
-    <html>
-
-    <head>
-
-        <meta charset="UTF-8">
-
-        <style>
-
-            html,
-            body {{
-                margin: 0;
-                padding: 0;
-                width: 100%;
-                height: 100%;
-                overflow: hidden;
-                background: #070a0e;
-            }}
-
-            #tv {{
-                width: 100%;
-                height: 100%;
-            }}
-
-        </style>
-
-    </head>
-
-    <body>
-
-        <div id="tv"></div>
-
-        <script
-            src="https://s3.tradingview.com/tv.js">
-        </script>
-
-        <script>
-
-        new TradingView.widget({{
-
-            "autosize": true,
-
-            "symbol":
-                "{tv_symbol}",
-
-            "interval":
-                "15",
-
-            "timezone":
-                "Etc/UTC",
-
-            "theme":
-                "dark",
-
-            "style":
-                "1",
-
-            "locale":
-                "en",
-
-            "enable_publishing":
-                false,
-
-            "hide_side_toolbar":
-                false,
-
-            "allow_symbol_change":
-                true,
-
-            "save_image":
-                false,
-
-            "container_id":
-                "tv",
-
-            "backgroundColor":
-                "#070a0e",
-
-            "gridColor":
-                "#151c23"
-
-        }});
-
-        </script>
-
-    </body>
-
-    </html>
-    """
-
-    st.iframe(
-        chart_html,
-        height=440,
-        width="stretch",
-    )
-
-
-stable_crypto_chart()
-
-
-# ============================================================
-# QUICK ENGINE CONTROLS
-# ============================================================
-
-c1, c2, c3, c4 = (
-    st.columns(
-        [
-            1,
-            1,
-            1,
-            2,
-        ]
-    )
-)
-
-
-with c1:
-
-    if st.session_state.bot_paused:
-
-        if st.button(
-            "▶ Resume Engines",
-            width="stretch",
-        ):
-
-            st.session_state.bot_paused = (
-                False
-            )
-
-            st.rerun()
-
-    else:
-
-        if st.button(
-            "⏸ Pause Engines",
-            width="stretch",
-        ):
-
-            st.session_state.bot_paused = (
-                True
-            )
-
-            st.rerun()
-
-
-with c2:
-
-    if st.button(
-        "🔎 Force Crypto Scan",
-        width="stretch",
-    ):
-
-        run_crypto_cycle()
-
-        st.rerun()
-
-
-with c3:
-
-    if st.button(
-        "🥇 Force Metals Scan",
-        width="stretch",
-    ):
-
-        st.session_state.metals_last_scan_at = (
-            None
-        )
-
-        run_parallel_metals_cycle()
-
-        st.rerun()
-
-
-with c4:
-
-    portfolio = (
-        st.session_state
-        .paper_trader
-        .get_portfolio_snapshot()
-    )
-
-    st.caption(
-        "PAPER ONLY • "
-        f"OPEN POSITIONS "
-        f"{portfolio['open_position_count']}/2 • "
-        "1 CRYPTO + 1 METAL • "
-        "REAL EXECUTION OFF"
-    )
-
-
-# ============================================================
-# LIVE DUAL-ENGINE FRAGMENT
-# ============================================================
-
-@st.fragment(
-    run_every=f"{POLL_SECONDS}s"
-)
-def live_engine():
-
-    trader = (
-        st.session_state.paper_trader
-    )
-
-    st.session_state.bot_error = (
-        None
-    )
-
-    update_daily_risk()
-
-    # --------------------------------------------------------
-    # RUN BOTH ENGINES
-    # --------------------------------------------------------
-
-    if PAPER_TRADING:
-
-        run_crypto_cycle()
-
-        run_parallel_metals_cycle()
-
-    # --------------------------------------------------------
-    # ACCOUNT / POSITIONS
-    # --------------------------------------------------------
-
-    balance = (
-        trader.get_balance()
-    )
-
-    crypto_position = (
-        trader.get_position(
-            CRYPTO_SLOT
-        )
-    )
-
-    metals_position = (
-        trader.get_position(
-            METALS_SLOT
-        )
-    )
-
-    history = (
-        trader.get_trade_history()
-    )
-
-    drawdown = (
-        st.session_state
-        .current_drawdown
-    )
-
-    total_pnl = sum(
-        safe_float(
-            trade.get(
-                "pnl"
-            )
-        )
-        for trade in history
-    )
-
-    # --------------------------------------------------------
-    # TOP STATUS
-    # --------------------------------------------------------
-
-    render_market_strip(
-        scanner_count=len(
-            SCAN_MARKETS
-        ),
-
-        bot_market=(
-            st.session_state
-            .crypto_market
-        ),
-
-        bot_status=(
-            "CRYPTO: "
-            f"{st.session_state.crypto_status}"
-            " | METALS: "
-            f"{st.session_state.metals_status}"
-        ),
-
-        poll_seconds=POLL_SECONDS,
-    )
-
-    render_top_metrics(
-        equity=balance,
-
-        realized_pnl=total_pnl,
-
-        closed_trades=len(
-            history
-        ),
-
-        drawdown=drawdown,
-
-        ai_score=(
-            st.session_state
-            .crypto_score
-        ),
-
-        mtf_confidence=(
-            st.session_state
-            .crypto_confidence
-        ),
-    )
-
-    # ========================================================
-    # OVERVIEW
-    # ========================================================
-
-    if selected_page == "Overview":
-
-        st.subheader(
-            "⚡ Dual-Engine Status"
-        )
-
-        left, right = (
-            st.columns(
-                2
-            )
-        )
-
-        # ----------------------------------------------------
-        # CRYPTO ENGINE
-        # ----------------------------------------------------
-
-        with left:
-
-            st.markdown(
-                "### ₿ Crypto Engine"
-            )
-
-            st.metric(
-                "Status",
-                st.session_state
-                .crypto_status,
-            )
-
-            st.metric(
-                "AI Score",
-                (
-                    f"{st.session_state.crypto_score:+.1f}"
-                ),
-            )
-
-            st.metric(
-                "MTF Confidence",
-                (
-                    f"{st.session_state.crypto_confidence:.1f}%"
-                ),
-            )
-
-            if crypto_position:
-
-                st.success(
-                    f"{crypto_position['symbol']} "
-                    f"{crypto_position['side']} "
-                    "is OPEN"
-                )
-
-            else:
-
-                st.info(
-                    "Crypto slot is available."
-                )
-
-        # ----------------------------------------------------
-        # METALS ENGINE
-        # ----------------------------------------------------
-
-        with right:
-
-            st.markdown(
-                "### 🥇 Metals Engine"
-            )
-
-            st.metric(
-                "Status",
-                st.session_state
-                .metals_status,
-            )
-
-            best = (
-                st.session_state
-                .metals_best_setup
-            )
-
-            if best:
-
-                st.metric(
-                    "Best Metal",
-                    best.get(
-                        "symbol",
-                        "—",
-                    ),
-                )
-
-                st.metric(
-                    "Metal Signal",
-                    best.get(
-                        "signal",
-                        "NO TRADE",
-                    ),
-                )
-
-                st.metric(
-                    "Metal MTF",
-                    (
-                        f"{safe_float(best.get('mtf_confidence')):.1f}%"
-                    ),
-                )
-
-            if metals_position:
-
-                st.success(
-                    f"{metals_position['symbol']} "
-                    f"{metals_position['side']} "
-                    "is OPEN"
-                )
-
-            else:
-
-                st.info(
-                    "Metals slot is available."
-                )
-
-
-    # ========================================================
-    # CRYPTO
-    # ========================================================
-
-    elif selected_page == "Crypto":
-
-        if crypto_position:
-
-            analytics_symbol = (
-                crypto_position.get(
-                    "symbol"
-                )
-            )
-
-        elif (
-            st.session_state.crypto_market
-            not in (
-                "",
-                "—",
-            )
-        ):
-
-            analytics_symbol = (
-                st.session_state.crypto_market
-            )
-
-        else:
-
-            analytics_symbol = (
-                st.session_state.chart_pair
-            )
-
-        regime = (
-            get_regime_data(
-                analytics_symbol
-            )
-        )
-
-        intelligence = (
-            scanner_intelligence(
-                st.session_state
-                .crypto_scanner_results
-            )
-        )
-
-        breadth = (
-            intelligence.get(
-                "breadth",
-                {},
-            )
-        )
-
-        render_intelligence_cards(
-            regime=regime[
-                "regime"
-            ],
-
-            trend=regime[
-                "trend"
-            ],
-
-            atr_pct=regime[
-                "atr_pct"
-            ],
-
-            momentum=regime[
-                "momentum"
-            ],
-
-            bullish_pct=safe_float(
-                breadth.get(
-                    "bullish_pct"
-                )
-            ),
-
-            bearish_pct=safe_float(
-                breadth.get(
-                    "bearish_pct"
-                )
-            ),
-        )
-
-        render_ai_core(
-            score=(
-                st.session_state
-                .crypto_score
-            ),
-
-            mtf_confidence=(
-                st.session_state
-                .crypto_confidence
-            ),
-
-            regime=regime[
-                "regime"
-            ],
-
-            trend=regime[
-                "trend"
-            ],
-
-            risk_pct=RISK_PCT,
-
-            position_state=(
-                crypto_position.get(
-                    "side"
-                )
-                if crypto_position
-                else "FLAT"
-            ),
-        )
-
-        if crypto_position:
-
-            st.info(
-                "Crypto scanner waits while "
-                "CRYPTO_MAIN is occupied."
-            )
-
-        else:
-
-            render_scanner(
-                st.session_state
-                .crypto_scanner_results
-            )
-
-        st.subheader(
-            "🧬 Crypto Correlation"
-        )
-
-        corr = (
-            build_crypto_correlation()
-        )
-
-        if (
-            corr is not None
-            and not corr.empty
-        ):
-
-            st.dataframe(
-                corr.round(
-                    2
-                ),
-                width="stretch",
-            )
-
-        else:
-
-            st.info(
-                "Correlation data is building."
-            )
-
-
-    # ========================================================
-    # METALS
-    # ========================================================
-
-    elif selected_page == "Metals":
-
-        # ----------------------------------------------------
-        # LIVE GOLD / SILVER QUOTES
-        # ----------------------------------------------------
-
-        render_metals_dashboard()
-
-        st.subheader(
-            "🥇 Gold / Silver AI Scanner"
-        )
-
-        metals_results = (
-            st.session_state
-            .metals_scanner_results
-        )
-
-        if metals_results:
-
-            rows = []
-
-            for item in metals_results:
-
-                rows.append(
-                    {
-                        "Market":
-                            item.get(
-                                "symbol"
-                            ),
-
-                        "Signal":
-                            item.get(
-                                "signal"
-                            ),
-
-                        "Score":
-                            item.get(
-                                "score"
-                            ),
-
-                        "MTF %":
-                            item.get(
-                                "mtf_confidence"
-                            ),
-
-                        "1H + 4H":
-                            item.get(
-                                "higher_tf_confirmed"
-                            ),
-
-                        "Approved":
-                            item.get(
-                                "approved"
-                            ),
-
-                        "Entry":
-                            item.get(
-                                "entry_price"
-                            ),
-
-                        "Reason":
-                            item.get(
-                                "reason"
-                            ),
-                    }
-                )
-
-            st.dataframe(
-                pd.DataFrame(
-                    rows
-                ),
-                width="stretch",
-                hide_index=True,
-            )
-
-        else:
-
-            if metals_position:
-
-                st.info(
-                    "METALS_MAIN position is "
-                    "currently being managed."
-                )
-
-            else:
-
-                st.info(
-                    "Waiting for Metals scanner cycle."
-                )
-
-        if (
-            st.session_state
-            .metals_best_setup
-        ):
-
-            with st.expander(
-                "Metals MTF Details"
-            ):
-
-                st.json(
-                    st.session_state
-                    .metals_best_setup
-                )
-
-
-    # ========================================================
-    # POSITIONS
-    # ========================================================
-
-    elif selected_page == "Positions":
-
-        st.subheader(
-            "📌 Open Paper Positions"
-        )
-
-        positions = (
-            trader.get_positions()
-        )
-
-        if positions:
-
-            rows = []
-
-            for position in positions:
-
-                symbol = (
-                    position.get(
-                        "symbol"
-                    )
-                )
-
-                if (
-                    position.get(
-                        "slot"
-                    )
-                    == METALS_SLOT
-                ):
-
-                    current = (
-                        get_metals_current_price(
-                            symbol
-                        )
-                    )
-
-                else:
-
-                    current = (
-                        get_current_price(
-                            symbol
-                        )
-                    )
-
-                pnl_pct = 0.0
-
-                if (
-                    current
-                    and position.get(
-                        "entry_price"
-                    )
-                ):
-
-                    entry = (
-                        safe_float(
-                            position.get(
-                                "entry_price"
-                            )
-                        )
-                    )
-
-                    if (
-                        position.get(
-                            "side"
-                        )
-                        == "LONG"
-                    ):
-
-                        pnl_pct = (
-                            (
-                                current
-                                - entry
-                            )
-                            / entry
-                            * 100
-                        )
-
-                    else:
-
-                        pnl_pct = (
-                            (
-                                entry
-                                - current
-                            )
-                            / entry
-                            * 100
-                        )
-
-                rows.append(
-                    {
-                        "Slot":
-                            position.get(
-                                "slot"
-                            ),
-
-                        "Asset":
-                            position.get(
-                                "asset_class"
-                            ),
-
-                        "Symbol":
-                            symbol,
-
-                        "Side":
-                            position.get(
-                                "side"
-                            ),
-
-                        "Entry":
-                            position.get(
-                                "entry_price"
-                            ),
-
-                        "Current":
-                            current,
-
-                        "PnL %":
-                            round(
-                                pnl_pct,
-                                3,
-                            ),
-
-                        "TP":
-                            position.get(
-                                "take_profit"
-                            ),
-
-                        "SL":
-                            position.get(
-                                "stop_loss"
-                            ),
-
-                        "Quantity":
-                            position.get(
-                                "quantity"
-                            ),
-
-                        "Opened":
-                            position.get(
-                                "opened_at"
-                            ),
-                    }
-                )
-
-            st.dataframe(
-                pd.DataFrame(
-                    rows
-                ),
-                width="stretch",
-                hide_index=True,
-            )
-
-        else:
-
-            st.info(
-                "No open paper positions."
-            )
-
-
-    # ========================================================
-    # SCANNER
-    # ========================================================
-
-    elif selected_page == "Scanner":
-
-        st.subheader(
-            "🔎 Crypto Scanner"
-        )
-
-        render_scanner(
-            st.session_state
-            .crypto_scanner_results
-        )
-
-        st.subheader(
-            "🥇 Metals Scanner"
-        )
-
-        if (
-            st.session_state
-            .metals_scanner_results
-        ):
-
-            metal_rows = []
-
-            for item in (
-                st.session_state
-                .metals_scanner_results
-            ):
-
-                metal_rows.append(
-                    {
-                        "Market":
-                            item.get(
-                                "symbol"
-                            ),
-
-                        "Signal":
-                            item.get(
-                                "signal"
-                            ),
-
-                        "Score":
-                            item.get(
-                                "score"
-                            ),
-
-                        "MTF %":
-                            item.get(
-                                "mtf_confidence"
-                            ),
-
-                        "Approved":
-                            item.get(
-                                "approved"
-                            ),
-
-                        "Reason":
-                            item.get(
-                                "reason"
-                            ),
-                    }
-                )
-
-            st.dataframe(
-                pd.DataFrame(
-                    metal_rows
-                ),
-                width="stretch",
-                hide_index=True,
-            )
-
-        else:
-
-            st.info(
-                "No Metals scanner result yet."
-            )
-
-
-    # ========================================================
-    # ANALYTICS
-    # ========================================================
-
-    elif selected_page == "Analytics":
-
-        statistics = (
-            trade_statistics(
-                history
-            )
-        )
-
-        render_trade_analytics(
-            statistics=statistics,
-            trade_history=history,
-        )
-
-        crypto_history = (
-            trader.get_trade_history(
-                asset_class="CRYPTO"
-            )
-        )
-
-        metal_history = (
-            trader.get_trade_history(
-                asset_class="METAL"
-            )
-        )
-
-        a1, a2 = (
-            st.columns(
-                2
-            )
-        )
-
-        with a1:
-
-            st.metric(
-                "Crypto Closed Trades",
-                len(
-                    crypto_history
-                ),
-            )
-
-        with a2:
-
-            st.metric(
-                "Metals Closed Trades",
-                len(
-                    metal_history
-                ),
-            )
-
-
-    # ========================================================
-    # SETTINGS / V3 CONTROL CENTER
-    # ========================================================
-
-    elif selected_page == "Settings":
-
-        render_control_center()
-
-
-    # ========================================================
-    # ERROR
-    # ========================================================
-
-    if st.session_state.bot_error:
-
-        st.error(
-            st.session_state.bot_error
-        )
-
-
-# ============================================================
-# START LIVE ENGINE
-# ============================================================
-
-live_engine()
-
-
-# ============================================================
-# V3.8 METALS HISTORICAL BOOTSTRAP CONTROL
-# ============================================================
-
-try:
-    from metals_bootstrap import (
-        run_bootstrap_cycle,
-        bootstrap_status,
-        metals_bootstrap_health,
-    )
-
-    st.markdown("---")
-    st.subheader("🧱 Metals Historical Bootstrap")
-
-    bootstrap_health = metals_bootstrap_health()
-    bootstrap_state = bootstrap_status()
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.metric(
-            "Bootstrap Engine",
-            "ONLINE"
-            if bootstrap_health.get("ok")
-            else "ERROR",
-        )
-
-    with col2:
-        st.metric(
-            "Requests Used / Hour",
-            bootstrap_state.get(
-                "requests_used_last_hour",
-                0,
-            ),
-        )
-
-    with col3:
-        st.metric(
-            "Hourly Safety Budget",
-            bootstrap_state.get(
-                "hourly_budget",
-                0,
-            ),
-        )
-
-    markets = bootstrap_state.get(
-        "markets",
-        {},
-    )
-
-    for symbol in (
-        "XAUUSD",
-        "XAGUSD",
-    ):
-
-        st.markdown(f"### {symbol}")
-
-        tf_data = markets.get(
-            symbol,
-            {},
-        )
-
-        c1, c2, c3 = st.columns(3)
-
-        for col, timeframe in zip(
-            (c1, c2, c3),
-            ("15m", "1h", "4h"),
-        ):
-            info = tf_data.get(
-                timeframe,
-                {},
-            )
-
-            with col:
-                st.metric(
-                    timeframe,
-                    (
-                        f"{info.get('candles', 0)}"
-                        f"/{info.get('target', 60)}"
-                    ),
-                )
-
-    if bootstrap_state.get(
-        "ready",
-        False,
-    ):
-        st.success(
-            "Metals historical bootstrap is complete."
-        )
-
-    else:
-        st.info(
-            "Historical candles are still building. "
-            "Run one safe bootstrap cycle at a time."
-        )
-
-        if st.button(
-            "🚀 Run Safe Metals Bootstrap",
-            use_container_width=True,
-        ):
-            with st.spinner(
-                "Fetching real historical Gold/Silver OHLC..."
-            ):
-                result = run_bootstrap_cycle(
-                    max_requests=4
-                )
-
-            if result.get("ok"):
-                st.success(
-                    "Bootstrap cycle completed."
-                )
-            else:
-                st.error(
-                    result.get(
-                        "reason",
-                        "Bootstrap cycle failed.",
-                    )
-                )
-
-            st.rerun()
-
-except Exception as bootstrap_ui_error:
-
-    st.warning(
-        "Metals bootstrap control unavailable: "
-        f"{bootstrap_ui_error}"
-    )
-
-
-# ============================================================
-# V3.9 AUTOMATIC METALS BOOTSTRAP RUNTIME
-# Free-Render / quota-safe / restart-safe
+# V5.1 AUTOMATIC METALS BOOTSTRAP RUNTIME
+# Existing Render Web Service
+# NO additional paid Background Worker required
 # ============================================================
 
 import os
@@ -2222,20 +13,29 @@ import psycopg
 
 @st.cache_resource
 def start_metals_auto_bootstrap():
-
     """
-    Starts ONE background bootstrap thread per Streamlit process.
+    PRO AI QUANT TERMINAL V5.1
+    WEB-SERVICE EMBEDDED METALS BOOTSTRAP RUNTIME
 
-    Safety:
-    - PostgreSQL advisory lock prevents duplicate runtimes
-    - Uses persistent bootstrap progress
-    - Fetches only missing history
-    - Balances XAU/XAG + 15m/1h/4h
-    - Respects historical API quota
-    - Automatically resumes after deploy/restart
-    - Stops requesting when all markets are ready
-    - NEVER enables real trading
+    Design
+    ------
+    - Runs inside the EXISTING Render Web Service.
+    - Does NOT require another Render Background Worker.
+    - PostgreSQL advisory lock guarantees one active
+      bootstrap owner across processes.
+    - Persistent database cursor survives deploy/restart.
+    - Gold-API historical budget remains protected.
+    - Publishes health into system_health.py.
+    - Publishes heartbeat during long sleep periods.
+    - Health/observability failure can NEVER stop bootstrap.
+    - No Streamlit API is called from the worker thread.
+    - PAPER ONLY.
+    - REAL EXECUTION DISABLED.
     """
+
+    # --------------------------------------------------------
+    # BOOTSTRAP ENGINE
+    # --------------------------------------------------------
 
     from metals_bootstrap import (
         bootstrap_status,
@@ -2243,37 +43,94 @@ def start_metals_auto_bootstrap():
         requests_used_last_hour,
     )
 
+    # --------------------------------------------------------
+    # V5 HEALTH BUS
+    # --------------------------------------------------------
+    #
+    # Keep health optional/fault-tolerant.
+    # Bootstrap must continue even if observability fails.
+    # --------------------------------------------------------
+
+    try:
+        from system_health import (
+            COMPONENT_METALS_BOOTSTRAP,
+            STATUS_HEALTHY,
+            heartbeat,
+            record_runtime_event,
+            report_error,
+            report_rate_limited,
+            report_warming_up,
+            structured_log,
+            update_runtime_state,
+        )
+
+        HEALTH_AVAILABLE = True
+
+    except Exception as health_import_error:
+
+        HEALTH_AVAILABLE = False
+
+        print(
+            "[METALS AUTO BOOTSTRAP] "
+            "V5 health module unavailable: "
+            f"{health_import_error}",
+            flush=True,
+        )
+
+    # --------------------------------------------------------
+    # ENVIRONMENT
+    # --------------------------------------------------------
+
     DATABASE_URL = os.environ.get(
         "DATABASE_URL",
         "",
     ).strip()
 
-    # SAME lock ID as dedicated worker.
-    # This means a future paid worker and this runtime
-    # can never bootstrap simultaneously.
+    # --------------------------------------------------------
+    # FIXED DISTRIBUTED LOCK
+    # --------------------------------------------------------
+
     ADVISORY_LOCK_ID = 93739001
 
-    # Gold-API free historical/OHLC plan = 10/hour.
-    # Existing metals_bootstrap.py safety ceiling = 8/hour.
+    # --------------------------------------------------------
+    # API SAFETY
+    # --------------------------------------------------------
+
     INTERNAL_HOURLY_LIMIT = 8
 
-    # One request every 8 minutes.
+    # One historical request approximately every 8 minutes.
     REQUEST_INTERVAL_SECONDS = 480
 
-    # Check again after budget is exhausted.
+    # Local/provider quota cooldown.
     BUDGET_WAIT_SECONDS = 600
 
-    # When bootstrap is complete.
+    # Bootstrap complete idle.
     READY_SLEEP_SECONDS = 3600
 
-    # Temporary API/database error retry.
+    # Temporary error retry.
     ERROR_SLEEP_SECONDS = 120
+
+    # Critical:
+    # system_health default stale limit is shorter than
+    # 480 / 600 / 3600 second sleeps.
+    # Keep publishing heartbeat while sleeping.
+    HEARTBEAT_INTERVAL_SECONDS = 120
+
+    RUNTIME_VERSION = "V5.1"
+
+    # --------------------------------------------------------
+    # SHARED RESOURCE STATE
+    # --------------------------------------------------------
 
     state = {
         "started": False,
         "lock_acquired": False,
+        "thread_alive": False,
         "last_result": None,
         "last_error": None,
+        "last_action": None,
+        "last_heartbeat": None,
+        "runtime_version": RUNTIME_VERSION,
     }
 
     if not DATABASE_URL:
@@ -2284,6 +141,10 @@ def start_metals_auto_bootstrap():
 
         return state
 
+    # ========================================================
+    # LOGGING
+    # ========================================================
+
     def log(message):
 
         print(
@@ -2292,13 +153,471 @@ def start_metals_auto_bootstrap():
             flush=True,
         )
 
-    def select_next_market(status):
+    # ========================================================
+    # SAFE HELPERS
+    # ========================================================
+
+    def safe_int(
+        value,
+        default=0,
+    ):
+
+        try:
+            return int(value)
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return default
+
+    def get_progress_payload(
+        status=None,
+        **extra,
+    ):
+
+        if not isinstance(
+            status,
+            dict,
+        ):
+
+            try:
+                status = bootstrap_status()
+
+            except Exception:
+                status = {}
+
+        markets = status.get(
+            "markets",
+            {},
+        )
+
+        total_candles = 0
+        total_target = 0
+        total_remaining = 0
+
+        progress_rows = {}
+
+        for symbol in (
+            "XAUUSD",
+            "XAGUSD",
+        ):
+
+            symbol_data = markets.get(
+                symbol,
+                {},
+            )
+
+            progress_rows[
+                symbol
+            ] = {}
+
+            for timeframe in (
+                "15m",
+                "1h",
+                "4h",
+            ):
+
+                info = symbol_data.get(
+                    timeframe,
+                    {},
+                )
+
+                candles = safe_int(
+                    info.get(
+                        "candles",
+                        0,
+                    )
+                )
+
+                target = safe_int(
+                    info.get(
+                        "target",
+                        60,
+                    ),
+                    60,
+                )
+
+                remaining = max(
+                    0,
+                    target - candles,
+                )
+
+                total_candles += candles
+                total_target += target
+                total_remaining += remaining
+
+                progress_rows[
+                    symbol
+                ][
+                    timeframe
+                ] = {
+                    "candles":
+                        candles,
+
+                    "target":
+                        target,
+
+                    "remaining":
+                        remaining,
+
+                    "ready":
+                        candles >= target,
+                }
+
+        progress_pct = 0.0
+
+        if total_target > 0:
+
+            progress_pct = min(
+                100.0,
+                (
+                    total_candles
+                    / total_target
+                    * 100.0
+                ),
+            )
+
+        payload = {
+            "runtime_version":
+                RUNTIME_VERSION,
+
+            "runtime_mode":
+                "EMBEDDED_WEB_SERVICE",
+
+            "paid_background_worker_required":
+                False,
+
+            "paper_only":
+                True,
+
+            "real_execution":
+                False,
+
+            "ready":
+                bool(
+                    status.get(
+                        "ready",
+                        False,
+                    )
+                ),
+
+            "progress_pct":
+                round(
+                    progress_pct,
+                    2,
+                ),
+
+            "total_candles":
+                total_candles,
+
+            "total_target":
+                total_target,
+
+            "total_remaining":
+                total_remaining,
+
+            "requests_used_last_hour":
+                safe_int(
+                    status.get(
+                        "requests_used_last_hour",
+                        0,
+                    )
+                ),
+
+            "hourly_budget":
+                safe_int(
+                    status.get(
+                        "hourly_budget",
+                        INTERNAL_HOURLY_LIMIT,
+                    ),
+                    INTERNAL_HOURLY_LIMIT,
+                ),
+
+            "markets":
+                progress_rows,
+
+            "advisory_lock_id":
+                ADVISORY_LOCK_ID,
+        }
+
+        payload.update(
+            extra
+        )
+
+        return payload
+
+    # ========================================================
+    # HEALTH WRAPPERS
+    # ========================================================
+
+    def publish_structured(
+        event,
+        message="",
+        level="INFO",
+        payload=None,
+    ):
+
+        if not HEALTH_AVAILABLE:
+            return
+
+        try:
+
+            structured_log(
+                COMPONENT_METALS_BOOTSTRAP,
+                event,
+                level=level,
+                message=message,
+                payload=(
+                    payload
+                    if isinstance(
+                        payload,
+                        dict,
+                    )
+                    else {}
+                ),
+            )
+
+        except Exception:
+            pass
+
+    def publish_heartbeat(
+        status=None,
+        message="Embedded bootstrap runtime alive.",
+    ):
+
+        if not HEALTH_AVAILABLE:
+            return
+
+        try:
+
+            payload = get_progress_payload(
+                status
+            )
+
+            heartbeat(
+                COMPONENT_METALS_BOOTSTRAP,
+                message=message,
+                payload=payload,
+            )
+
+            state[
+                "last_heartbeat"
+            ] = time.time()
+
+        except Exception as error:
+
+            log(
+                "Health heartbeat failed: "
+                f"{error}"
+            )
+
+    def publish_warming(
+        status,
+        message,
+        **extra,
+    ):
+
+        if not HEALTH_AVAILABLE:
+            return
+
+        try:
+
+            report_warming_up(
+                COMPONENT_METALS_BOOTSTRAP,
+                message=message,
+                payload=get_progress_payload(
+                    status,
+                    **extra,
+                ),
+            )
+
+            state[
+                "last_heartbeat"
+            ] = time.time()
+
+        except Exception as error:
+
+            log(
+                "Health warm-up publish failed: "
+                f"{error}"
+            )
+
+    def publish_rate_limit(
+        status,
+        message,
+        **extra,
+    ):
+
+        if not HEALTH_AVAILABLE:
+            return
+
+        try:
+
+            report_rate_limited(
+                COMPONENT_METALS_BOOTSTRAP,
+                message=message,
+                payload=get_progress_payload(
+                    status,
+                    **extra,
+                ),
+            )
+
+            state[
+                "last_heartbeat"
+            ] = time.time()
+
+        except Exception as error:
+
+            log(
+                "Health rate-limit publish failed: "
+                f"{error}"
+            )
+
+    def publish_error(
+        message,
+        status=None,
+        **extra,
+    ):
+
+        if not HEALTH_AVAILABLE:
+            return
+
+        try:
+
+            report_error(
+                COMPONENT_METALS_BOOTSTRAP,
+                message=message,
+                payload=get_progress_payload(
+                    status,
+                    **extra,
+                ),
+            )
+
+            state[
+                "last_heartbeat"
+            ] = time.time()
+
+        except Exception as error:
+
+            log(
+                "Health error publish failed: "
+                f"{error}"
+            )
+
+    def publish_ready(
+        status,
+    ):
+
+        if not HEALTH_AVAILABLE:
+            return
+
+        try:
+
+            update_runtime_state(
+                COMPONENT_METALS_BOOTSTRAP,
+                status=STATUS_HEALTHY,
+                success=True,
+                message=(
+                    "Metals historical bootstrap READY."
+                ),
+                payload=get_progress_payload(
+                    status,
+                    bootstrap_complete=True,
+                ),
+            )
+
+            state[
+                "last_heartbeat"
+            ] = time.time()
+
+        except Exception as error:
+
+            log(
+                "Health READY publish failed: "
+                f"{error}"
+            )
+
+    # ========================================================
+    # INTERRUPTIBLE / HEARTBEAT-AWARE SLEEP
+    # ========================================================
+
+    def heartbeat_sleep(
+        seconds,
+        status=None,
+        reason="idle",
+    ):
+
+        seconds = max(
+            1,
+            safe_int(
+                seconds,
+                1,
+            ),
+        )
+
+        deadline = (
+            time.monotonic()
+            + seconds
+        )
+
+        last_hb = 0.0
+
+        while (
+            time.monotonic()
+            < deadline
+        ):
+
+            remaining = (
+                deadline
+                - time.monotonic()
+            )
+
+            time.sleep(
+                min(
+                    10.0,
+                    max(
+                        0.1,
+                        remaining,
+                    ),
+                )
+            )
+
+            now_monotonic = (
+                time.monotonic()
+            )
+
+            if (
+                now_monotonic
+                - last_hb
+                >= HEARTBEAT_INTERVAL_SECONDS
+            ):
+
+                publish_heartbeat(
+                    status=status,
+                    message=(
+                        "Embedded metals bootstrap alive "
+                        f"while {reason}."
+                    ),
+                )
+
+                last_hb = (
+                    now_monotonic
+                )
+
+    # ========================================================
+    # FAIR MARKET SELECTION
+    # ========================================================
+
+    def select_next_market(
+        status,
+    ):
 
         """
-        Select the least-complete timeframe first.
+        Least-complete series wins.
 
-        This avoids the old problem where XAU 4h could consume
-        every request before XAG / 1h / 15m received history.
+        Prevents one symbol or timeframe consuming the entire
+        historical quota.
         """
 
         markets = status.get(
@@ -2340,24 +659,22 @@ def start_metals_auto_bootstrap():
                     {},
                 )
 
-                candles = int(
+                candles = safe_int(
                     info.get(
                         "candles",
                         0,
                     )
-                    or 0
                 )
 
-                target = int(
+                target = safe_int(
                     info.get(
                         "target",
                         60,
-                    )
-                    or 60
+                    ),
+                    60,
                 )
 
                 if candles >= target:
-
                     continue
 
                 completion_ratio = (
@@ -2382,7 +699,6 @@ def start_metals_auto_bootstrap():
                 )
 
         if not candidates:
-
             return None
 
         candidates.sort()
@@ -2397,23 +713,35 @@ def start_metals_auto_bootstrap():
                 selected[5],
         }
 
+    # ========================================================
+    # WORKER LOOP
+    # ========================================================
+
     def worker_loop():
 
         lock_connection = None
 
+        state[
+            "thread_alive"
+        ] = True
+
         try:
 
             # ------------------------------------------------
-            # DATABASE SINGLE-RUNTIME LOCK
+            # SESSION-LEVEL DISTRIBUTED LOCK
             # ------------------------------------------------
 
-            lock_connection = psycopg.connect(
-                DATABASE_URL,
-                autocommit=True,
-                connect_timeout=10,
+            lock_connection = (
+                psycopg.connect(
+                    DATABASE_URL,
+                    autocommit=True,
+                    connect_timeout=10,
+                )
             )
 
-            with lock_connection.cursor() as cur:
+            with (
+                lock_connection.cursor()
+            ) as cur:
 
                 cur.execute(
                     """
@@ -2437,21 +765,84 @@ def start_metals_auto_bootstrap():
 
             if not lock_acquired:
 
-                log(
+                message = (
                     "Another metals bootstrap runtime "
-                    "already owns the lock. "
-                    "This runtime will stay disabled."
+                    "already owns the PostgreSQL lock. "
+                    "This embedded runtime is disabled."
+                )
+
+                log(
+                    message
+                )
+
+                publish_structured(
+                    "LOCK_NOT_ACQUIRED",
+                    message=message,
+                    level="WARNING",
+                    payload={
+                        "lock_id":
+                            ADVISORY_LOCK_ID,
+                    },
                 )
 
                 return
+
+            # ------------------------------------------------
+            # LOCK ACQUIRED
+            # ------------------------------------------------
 
             log(
                 "Automatic bootstrap lock acquired."
             )
 
-            # ------------------------------------------------
+            state[
+                "last_action"
+            ] = "LOCK_ACQUIRED"
+
+            publish_structured(
+                "RUNTIME_STARTED",
+                message=(
+                    "Embedded metals bootstrap runtime started."
+                ),
+                payload={
+                    "runtime_version":
+                        RUNTIME_VERSION,
+
+                    "mode":
+                        "EMBEDDED_WEB_SERVICE",
+
+                    "lock_id":
+                        ADVISORY_LOCK_ID,
+                },
+            )
+
+            if HEALTH_AVAILABLE:
+
+                try:
+
+                    record_runtime_event(
+                        COMPONENT_METALS_BOOTSTRAP,
+                        "RUNTIME_STARTED",
+                        severity="INFO",
+                        message=(
+                            "Embedded Web Service metals "
+                            "bootstrap runtime started."
+                        ),
+                        payload={
+                            "version":
+                                RUNTIME_VERSION,
+
+                            "paid_worker":
+                                False,
+                        },
+                    )
+
+                except Exception:
+                    pass
+
+            # =================================================
             # MAIN LOOP
-            # ------------------------------------------------
+            # =================================================
 
             while True:
 
@@ -2461,33 +852,45 @@ def start_metals_auto_bootstrap():
                         bootstrap_status()
                     )
 
-                    # ----------------------------------------
-                    # COMPLETE
-                    # ----------------------------------------
+                    # -----------------------------------------
+                    # BOOTSTRAP COMPLETE
+                    # -----------------------------------------
 
                     if status.get(
                         "ready",
                         False,
                     ):
 
+                        state[
+                            "last_action"
+                        ] = "READY"
+
                         log(
                             "Historical bootstrap READY. "
                             "No API request required."
                         )
 
-                        time.sleep(
-                            READY_SLEEP_SECONDS
+                        publish_ready(
+                            status
+                        )
+
+                        heartbeat_sleep(
+                            READY_SLEEP_SECONDS,
+                            status=status,
+                            reason=(
+                                "bootstrap READY idle"
+                            ),
                         )
 
                         continue
 
-                    # ----------------------------------------
-                    # HOURLY API BUDGET
-                    # ----------------------------------------
+                    # -----------------------------------------
+                    # INTERNAL HOURLY BUDGET
+                    # -----------------------------------------
 
-                    used = int(
-                        requests_used_last_hour()
-                        or 0
+                    used = safe_int(
+                        requests_used_last_hour(),
+                        0,
                     )
 
                     if (
@@ -2495,22 +898,46 @@ def start_metals_auto_bootstrap():
                         >= INTERNAL_HOURLY_LIMIT
                     ):
 
-                        log(
+                        state[
+                            "last_action"
+                        ] = "LOCAL_RATE_LIMIT"
+
+                        message = (
                             "Hourly historical budget reached: "
                             f"{used}/"
                             f"{INTERNAL_HOURLY_LIMIT}. "
-                            "Waiting."
+                            "Waiting safely."
                         )
 
-                        time.sleep(
-                            BUDGET_WAIT_SECONDS
+                        log(
+                            message
+                        )
+
+                        publish_rate_limit(
+                            status,
+                            message,
+                            limit_type=(
+                                "INTERNAL_HISTORICAL_BUDGET"
+                            ),
+                            requests_used=used,
+                            wait_seconds=(
+                                BUDGET_WAIT_SECONDS
+                            ),
+                        )
+
+                        heartbeat_sleep(
+                            BUDGET_WAIT_SECONDS,
+                            status=status,
+                            reason=(
+                                "internal quota wait"
+                            ),
                         )
 
                         continue
 
-                    # ----------------------------------------
+                    # -----------------------------------------
                     # SELECT LEAST-COMPLETE SERIES
-                    # ----------------------------------------
+                    # -----------------------------------------
 
                     selected = (
                         select_next_market(
@@ -2520,12 +947,24 @@ def start_metals_auto_bootstrap():
 
                     if selected is None:
 
+                        state[
+                            "last_action"
+                        ] = "NO_MISSING_SERIES"
+
                         log(
                             "No missing historical series."
                         )
 
-                        time.sleep(
-                            READY_SLEEP_SECONDS
+                        publish_ready(
+                            status
+                        )
+
+                        heartbeat_sleep(
+                            READY_SLEEP_SECONDS,
+                            status=status,
+                            reason=(
+                                "no missing series"
+                            ),
                         )
 
                         continue
@@ -2538,14 +977,30 @@ def start_metals_auto_bootstrap():
                         "timeframe"
                     ]
 
+                    state[
+                        "last_action"
+                    ] = (
+                        f"FETCH_{symbol}_{timeframe}"
+                    )
+
                     log(
                         "Fetching next historical candle: "
                         f"{symbol} {timeframe}"
                     )
 
-                    # ----------------------------------------
-                    # ONE SAFE API REQUEST
-                    # ----------------------------------------
+                    publish_warming(
+                        status,
+                        (
+                            "Fetching historical "
+                            f"{symbol} {timeframe}."
+                        ),
+                        current_symbol=symbol,
+                        current_timeframe=timeframe,
+                    )
+
+                    # -----------------------------------------
+                    # EXACTLY ONE HISTORICAL API REQUEST
+                    # -----------------------------------------
 
                     result = (
                         fetch_gold_api_ohlc(
@@ -2562,57 +1017,227 @@ def start_metals_auto_bootstrap():
                         "last_error"
                     ] = None
 
+                    # -----------------------------------------
+                    # SUCCESS
+                    # -----------------------------------------
+
                     if result.get(
                         "ok",
                         False,
                     ):
+
+                        state[
+                            "last_action"
+                        ] = "CANDLE_STORED"
 
                         log(
                             "Historical candle stored: "
                             f"{symbol} {timeframe}"
                         )
 
+                        try:
+
+                            refreshed_status = (
+                                bootstrap_status()
+                            )
+
+                        except Exception:
+
+                            refreshed_status = (
+                                status
+                            )
+
+                        publish_warming(
+                            refreshed_status,
+                            (
+                                "Historical candle stored: "
+                                f"{symbol} {timeframe}."
+                            ),
+                            last_symbol=symbol,
+                            last_timeframe=timeframe,
+                            last_result="STORED",
+                        )
+
+                        publish_structured(
+                            "HISTORICAL_CANDLE_STORED",
+                            message=(
+                                f"{symbol} {timeframe}"
+                            ),
+                            payload={
+                                "symbol":
+                                    symbol,
+
+                                "timeframe":
+                                    timeframe,
+                            },
+                        )
+
+                    # -----------------------------------------
+                    # LOCAL BUDGET REACHED
+                    # -----------------------------------------
+
                     elif result.get(
                         "rate_limited_locally",
                         False,
                     ):
 
-                        log(
-                            "Local API budget reached."
+                        state[
+                            "last_action"
+                        ] = "LOCAL_RATE_LIMIT"
+
+                        message = (
+                            "Local historical API "
+                            "budget reached."
                         )
 
-                        time.sleep(
-                            BUDGET_WAIT_SECONDS
+                        log(
+                            message
+                        )
+
+                        publish_rate_limit(
+                            status,
+                            message,
+                            limit_type="LOCAL",
+                            wait_seconds=(
+                                BUDGET_WAIT_SECONDS
+                            ),
+                        )
+
+                        heartbeat_sleep(
+                            BUDGET_WAIT_SECONDS,
+                            status=status,
+                            reason=(
+                                "local API budget wait"
+                            ),
                         )
 
                         continue
+
+                    # -----------------------------------------
+                    # PROVIDER RATE LIMIT
+                    # -----------------------------------------
 
                     elif result.get(
                         "provider_rate_limited",
                         False,
                     ):
 
-                        log(
-                            "Gold-API rate limit reached. "
-                            "Waiting safely."
+                        state[
+                            "last_action"
+                        ] = "PROVIDER_RATE_LIMIT"
+
+                        message = (
+                            "Gold-API historical rate "
+                            "limit reached. Waiting safely."
                         )
 
-                        time.sleep(
-                            BUDGET_WAIT_SECONDS
+                        log(
+                            message
+                        )
+
+                        publish_rate_limit(
+                            status,
+                            message,
+                            provider="Gold-API",
+                            limit_type="PROVIDER",
+                            wait_seconds=(
+                                BUDGET_WAIT_SECONDS
+                            ),
+                        )
+
+                        heartbeat_sleep(
+                            BUDGET_WAIT_SECONDS,
+                            status=status,
+                            reason=(
+                                "Gold-API rate-limit wait"
+                            ),
                         )
 
                         continue
 
-                    else:
+                    # -----------------------------------------
+                    # CLOSED SESSION / NO USABLE CANDLE
+                    # -----------------------------------------
 
-                        log(
-                            "Historical request returned "
-                            f"no usable candle: {result}"
+                    elif result.get(
+                        "skipped_interval",
+                        False,
+                    ):
+
+                        state[
+                            "last_action"
+                        ] = "INTERVAL_SKIPPED"
+
+                        message = (
+                            "Historical interval skipped: "
+                            f"{symbol} {timeframe}."
                         )
 
-                    # One request every 8 minutes.
-                    time.sleep(
-                        REQUEST_INTERVAL_SECONDS
+                        log(
+                            message
+                        )
+
+                        publish_warming(
+                            status,
+                            message,
+                            current_symbol=symbol,
+                            current_timeframe=timeframe,
+                            result_type=(
+                                "SKIPPED_INTERVAL"
+                            ),
+                        )
+
+                    # -----------------------------------------
+                    # NON-FATAL PROVIDER RESPONSE
+                    # -----------------------------------------
+
+                    else:
+
+                        state[
+                            "last_action"
+                        ] = "NO_USABLE_CANDLE"
+
+                        message = (
+                            "Historical request returned "
+                            "no usable candle: "
+                            f"{result}"
+                        )
+
+                        log(
+                            message
+                        )
+
+                        publish_warming(
+                            status,
+                            message,
+                            current_symbol=symbol,
+                            current_timeframe=timeframe,
+                            result_type=(
+                                "NO_USABLE_CANDLE"
+                            ),
+                        )
+
+                    # -----------------------------------------
+                    # NORMAL QUOTA-SAFE INTERVAL
+                    # -----------------------------------------
+
+                    heartbeat_sleep(
+                        REQUEST_INTERVAL_SECONDS,
+                        status=(
+                            refreshed_status
+                            if (
+                                result.get(
+                                    "ok",
+                                    False,
+                                )
+                                and "refreshed_status"
+                                in locals()
+                            )
+                            else status
+                        ),
+                        reason=(
+                            "normal historical request interval"
+                        ),
                     )
 
                 except Exception as error:
@@ -2623,13 +1248,50 @@ def start_metals_auto_bootstrap():
                         error
                     )
 
-                    log(
+                    state[
+                        "last_action"
+                    ] = "CYCLE_ERROR"
+
+                    message = (
                         "Runtime cycle error: "
                         f"{error}"
                     )
 
-                    time.sleep(
-                        ERROR_SLEEP_SECONDS
+                    log(
+                        message
+                    )
+
+                    publish_error(
+                        message,
+                        error_type=(
+                            type(
+                                error
+                            ).__name__
+                        ),
+                        retry_seconds=(
+                            ERROR_SLEEP_SECONDS
+                        ),
+                    )
+
+                    publish_structured(
+                        "RUNTIME_CYCLE_ERROR",
+                        message=str(
+                            error
+                        ),
+                        level="ERROR",
+                        payload={
+                            "error_type":
+                                type(
+                                    error
+                                ).__name__,
+                        },
+                    )
+
+                    heartbeat_sleep(
+                        ERROR_SLEEP_SECONDS,
+                        reason=(
+                            "runtime error retry"
+                        ),
                     )
 
         except Exception as error:
@@ -2640,12 +1302,34 @@ def start_metals_auto_bootstrap():
                 error
             )
 
-            log(
+            state[
+                "last_action"
+            ] = "STARTUP_ERROR"
+
+            message = (
                 "Runtime startup error: "
                 f"{error}"
             )
 
+            log(
+                message
+            )
+
+            publish_error(
+                message,
+                error_type=(
+                    type(
+                        error
+                    ).__name__
+                ),
+                phase="STARTUP",
+            )
+
         finally:
+
+            # ------------------------------------------------
+            # RELEASE ADVISORY LOCK
+            # ------------------------------------------------
 
             if (
                 lock_connection
@@ -2668,7 +1352,6 @@ def start_metals_auto_bootstrap():
                         )
 
                 except Exception:
-
                     pass
 
                 try:
@@ -2676,12 +1359,50 @@ def start_metals_auto_bootstrap():
                     lock_connection.close()
 
                 except Exception:
-
                     pass
+
+            state[
+                "lock_acquired"
+            ] = False
+
+            state[
+                "thread_alive"
+            ] = False
+
+            if HEALTH_AVAILABLE:
+
+                try:
+
+                    update_runtime_state(
+                        COMPONENT_METALS_BOOTSTRAP,
+                        status="OFFLINE",
+                        success=False,
+                        message=(
+                            "Embedded metals bootstrap "
+                            "runtime stopped."
+                        ),
+                        payload={
+                            "runtime_version":
+                                RUNTIME_VERSION,
+
+                            "runtime_mode":
+                                "EMBEDDED_WEB_SERVICE",
+
+                            "paper_only":
+                                True,
+                        },
+                    )
+
+                except Exception:
+                    pass
+
+    # ========================================================
+    # START DAEMON THREAD
+    # ========================================================
 
     thread = threading.Thread(
         target=worker_loop,
-        name="metals-auto-bootstrap",
+        name="metals-auto-bootstrap-v5",
         daemon=True,
     )
 
@@ -2691,11 +1412,15 @@ def start_metals_auto_bootstrap():
         "started"
     ] = True
 
+    state[
+        "thread_name"
+    ] = thread.name
+
     return state
 
 
 # ============================================================
-# START AUTOMATIC BOOTSTRAP
+# START EXISTING-WEB-SERVICE BOOTSTRAP
 # ============================================================
 
 _metals_auto_bootstrap_state = (
