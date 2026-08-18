@@ -734,3 +734,149 @@ def metals_candles_cache_status(
             False,
     }
 
+# ============================================================
+# V3.7 SCANNER COMPATIBILITY CACHE STATUS
+# ============================================================
+
+def metals_candles_cache_status(
+    symbol=None,
+):
+    """
+    Compatibility adapter for the existing metals_scanner.py.
+
+    Old scanner expects cache records like:
+        XAUUSD:15min:200
+        XAUUSD:1h:200
+        XAUUSD:4h:200
+
+    V3.7 now builds candles locally from PostgreSQL.
+    This function translates local readiness into the old
+    scanner cache interface without using Twelve Data.
+    """
+
+    symbols = (
+        [symbol]
+        if symbol
+        else [
+            "XAUUSD",
+            "XAGUSD",
+        ]
+    )
+
+    result = {
+        "provider":
+            "LOCAL_POSTGRES_OHLC",
+
+        "provider_cooldown_seconds":
+            0,
+
+        "external_api":
+            False,
+
+        "twelve_data_required":
+            False,
+
+        "paid_api_required":
+            False,
+    }
+
+    for raw_symbol in symbols:
+
+        normalized = (
+            _normalize_symbol(
+                raw_symbol
+            )
+        )
+
+        readiness = (
+            get_metals_candle_readiness(
+                normalized
+            )
+        )
+
+        timeframes = (
+            readiness.get(
+                "timeframes",
+                {}
+            )
+        )
+
+        key_map = {
+            "15m":
+                f"{normalized}:15min:200",
+
+            "1h":
+                f"{normalized}:1h:200",
+
+            "4h":
+                f"{normalized}:4h:200",
+        }
+
+        for timeframe, cache_key in (
+            key_map.items()
+        ):
+
+            tf_status = (
+                timeframes.get(
+                    timeframe,
+                    {}
+                )
+            )
+
+            ready = bool(
+                tf_status.get(
+                    "ready",
+                    False,
+                )
+            )
+
+            candle_count = int(
+                tf_status.get(
+                    "candles",
+                    0,
+                )
+                or 0
+            )
+
+            minimum = int(
+                tf_status.get(
+                    "minimum",
+                    60,
+                )
+                or 60
+            )
+
+            result[
+                cache_key
+            ] = {
+                "fresh":
+                    ready,
+
+                "stale_usable":
+                    False,
+
+                "age_seconds":
+                    0
+                    if ready
+                    else None,
+
+                "ready":
+                    ready,
+
+                "candles":
+                    candle_count,
+
+                "minimum":
+                    minimum,
+
+                "source":
+                    "LOCAL_POSTGRES_OHLC",
+
+                "provider":
+                    "Gold-API + PostgreSQL",
+
+                "external_api":
+                    False,
+            }
+
+    return result
