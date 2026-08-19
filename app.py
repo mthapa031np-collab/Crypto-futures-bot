@@ -1,7 +1,7 @@
 """
 app.py
 
-PRO AI QUANT TERMINAL V5.2 FAST DISPLAY
+PRO AI QUANT TERMINAL V5.3 ASYNC RUNTIME
 Institutional multi-asset paper-trading terminal.
 
 Design goals
@@ -23,6 +23,7 @@ REAL ORDERS DISABLED.
 from __future__ import annotations
 
 import html as html_lib
+import json
 import os
 import threading
 import time
@@ -96,7 +97,7 @@ except Exception as _health_import_error:
 # PLATFORM CONSTANTS
 # ============================================================
 
-PLATFORM_VERSION = "V5.2-FAST-DISPLAY"
+PLATFORM_VERSION = "V5.3-ASYNC-RUNTIME"
 PAPER_ONLY = True
 REAL_EXECUTION_ENABLED = False
 METALS_SCAN_SECONDS = 300
@@ -478,11 +479,278 @@ def update_daily_risk() -> float:
 
     return drawdown
 
+
+# ============================================================
+# V5.3 PERSISTENT RUNTIME STATE
+# PostgreSQL-backed UI/engine handoff
+# ============================================================
+
+RUNTIME_STATE_TABLE = "pro_ai_runtime_state"
+CRYPTO_RUNTIME_LOCK_ID = 93739002
+CRYPTO_RUNTIME_POLL_SECONDS = max(
+    30,
+    int(os.environ.get("CRYPTO_RUNTIME_POLL_SECONDS", "60")),
+)
+CRYPTO_RUNTIME_IDLE_CHECK_SECONDS = 2
+
+
+def _json_safe(value: Any) -> Any:
+    """
+    Convert common Python / pandas / numpy values into JSON-safe values.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    if isinstance(value, dict):
+        return {
+            str(key): _json_safe(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+
+    item_method = getattr(value, "item", None)
+    if callable(item_method):
+        try:
+            return _json_safe(item_method())
+        except Exception:
+            pass
+
+    iso_method = getattr(value, "isoformat", None)
+    if callable(iso_method):
+        try:
+            return iso_method()
+        except Exception:
+            pass
+
+    return str(value)
+
+
+def _runtime_db_connect():
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is not configured")
+
+    return psycopg.connect(
+        database_url,
+        autocommit=True,
+        connect_timeout=10,
+    )
+
+
+def ensure_runtime_state_schema() -> bool:
+    """
+    Idempotent schema creation. Safe across deploys and process restarts.
+    """
+    try:
+        with _runtime_db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {RUNTIME_STATE_TABLE} (
+                        state_key TEXT PRIMARY KEY,
+                        payload JSONB NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+        return True
+
+    except Exception as error:
+        print(
+            f"[V5.3 RUNTIME STATE] Schema error: {error}",
+            flush=True,
+        )
+        return False
+
+
+def write_runtime_state(
+    state_key: str,
+    payload: Dict[str, Any],
+) -> bool:
+    try:
+        safe_payload = _json_safe(payload)
+        encoded = json.dumps(
+            safe_payload,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+
+        with _runtime_db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO {RUNTIME_STATE_TABLE}
+                        (state_key, payload, updated_at)
+                    VALUES
+                        (%s, %s::jsonb, NOW())
+                    ON CONFLICT (state_key)
+                    DO UPDATE SET
+                        payload = EXCLUDED.payload,
+                        updated_at = NOW()
+                    """,
+                    (
+                        str(state_key),
+                        encoded,
+                    ),
+                )
+
+        return True
+
+    except Exception as error:
+        print(
+            f"[V5.3 RUNTIME STATE] Write {state_key} failed: {error}",
+            flush=True,
+        )
+        return False
+
+
+def read_runtime_state(
+    state_key: str,
+    default: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    fallback = dict(default or {})
+
+    try:
+        with _runtime_db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT payload, updated_at
+                    FROM {RUNTIME_STATE_TABLE}
+                    WHERE state_key = %s
+                    """,
+                    (str(state_key),),
+                )
+
+                row = cur.fetchone()
+
+        if not row:
+            return fallback
+
+        payload = row[0]
+
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+
+        if not isinstance(payload, dict):
+            return fallback
+
+        result = dict(payload)
+
+        if row[1] is not None:
+            result["_updated_at"] = row[1].isoformat()
+
+        return result
+
+    except Exception as error:
+        print(
+            f"[V5.3 RUNTIME STATE] Read {state_key} failed: {error}",
+            flush=True,
+        )
+        return fallback
+
+
+def get_crypto_control() -> Dict[str, Any]:
+    return read_runtime_state(
+        "crypto_control",
+        {
+            "paused": False,
+            "force_nonce": "",
+        },
+    )
+
+
+def set_crypto_paused(paused: bool) -> None:
+    current = get_crypto_control()
+
+    write_runtime_state(
+        "crypto_control",
+        {
+            "paused": bool(paused),
+            "force_nonce": current.get("force_nonce", ""),
+        },
+    )
+
+
+def request_crypto_force_scan() -> None:
+    current = get_crypto_control()
+
+    write_runtime_state(
+        "crypto_control",
+        {
+            "paused": bool(current.get("paused", False)),
+            "force_nonce": utc_now().isoformat(),
+        },
+    )
+
+
+def sync_crypto_runtime_snapshot() -> None:
+    """
+    Cheap UI-side synchronization from PostgreSQL.
+    No market API requests and no strategy calculations occur here.
+    """
+    snapshot = read_runtime_state(
+        "crypto_runtime",
+        {},
+    )
+
+    if not snapshot:
+        return
+
+    st.session_state.crypto_status = snapshot.get(
+        "status",
+        st.session_state.crypto_status,
+    )
+    st.session_state.crypto_market = snapshot.get(
+        "market",
+        st.session_state.crypto_market,
+    )
+    st.session_state.crypto_signal = snapshot.get(
+        "signal",
+        st.session_state.crypto_signal,
+    )
+    st.session_state.crypto_score = safe_float(
+        snapshot.get(
+            "score",
+            st.session_state.crypto_score,
+        )
+    )
+    st.session_state.crypto_confidence = safe_float(
+        snapshot.get(
+            "confidence",
+            st.session_state.crypto_confidence,
+        )
+    )
+    st.session_state.crypto_reason = snapshot.get(
+        "reason",
+        st.session_state.crypto_reason,
+    )
+
+    scanner_results = snapshot.get(
+        "scanner_results",
+        st.session_state.crypto_scanner_results,
+    )
+
+    if isinstance(scanner_results, list):
+        st.session_state.crypto_scanner_results = scanner_results
+
+    strategy = snapshot.get("strategy")
+
+    if isinstance(strategy, dict):
+        st.session_state.crypto_strategy_result = strategy
+
+
 # ============================================================
 # CRYPTO ANALYTICS
 # ============================================================
 
-@st.cache_data(ttl=20, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def get_regime_data(symbol: str) -> Dict[str, Any]:
     try:
         candles = get_candles(
@@ -531,7 +799,7 @@ def build_crypto_correlation():
     return correlation_matrix(candle_map)
 
 
-@st.cache_data(ttl=20, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def get_market_strip() -> list[Dict[str, Any]]:
     output = []
     for symbol in CORE_TICKERS:
@@ -758,18 +1026,25 @@ selected_page = st.radio(
 
 c1, c2, c3, c4 = st.columns([1, 1, 1, 2.2])
 with c1:
-    if st.session_state.bot_paused:
-        if st.button("▶ RESUME ENGINES", width="stretch"):
+    crypto_control = get_crypto_control()
+    crypto_paused = bool(crypto_control.get("paused", False))
+    st.session_state.bot_paused = crypto_paused
+
+    if crypto_paused:
+        if st.button("▶ RESUME CRYPTO ENGINE", width="stretch"):
+            set_crypto_paused(False)
             st.session_state.bot_paused = False
             st.rerun()
     else:
-        if st.button("Ⅱ PAUSE ENGINES", width="stretch"):
+        if st.button("Ⅱ PAUSE CRYPTO ENGINE", width="stretch"):
+            set_crypto_paused(True)
             st.session_state.bot_paused = True
             st.rerun()
 
 with c2:
     if st.button("◉ FORCE CRYPTO SCAN", width="stretch"):
-        run_crypto_cycle(force_scan=True)
+        request_crypto_force_scan()
+        st.session_state.crypto_status = "FORCE SCAN REQUESTED"
         st.rerun()
 
 with c3:
@@ -883,12 +1158,10 @@ def live_terminal() -> None:
     update_daily_risk()
     publish_web_heartbeat()
 
-    # V5.2 FAST DISPLAY MODE:
-    # Never run scanners/trading engines from a Streamlit UI refresh.
-    # Manual FORCE buttons remain available. Autonomous lifecycle and
-    # metals bootstrap runtimes continue independently.
-    if PAPER_TRADING:
-        pass
+    # V5.3:
+    # UI reads the latest PostgreSQL runtime snapshot only.
+    # It never runs scanner / strategy / execution work on rerender.
+    sync_crypto_runtime_snapshot()
 
     balance = safe_float(trader.get_balance())
     history = trader.get_trade_history()
@@ -1236,6 +1509,482 @@ try:
 except Exception as bootstrap_ui_error:
     if selected_page in ("Metals", "Risk", "Settings"):
         st.warning(f"Historical bootstrap UI unavailable: {bootstrap_ui_error}")
+
+
+# ============================================================
+# V5.3 AUTONOMOUS CRYPTO SCANNER / ENTRY RUNTIME
+# PostgreSQL advisory lock + persistent snapshot
+# No Streamlit API calls inside worker thread
+# ============================================================
+
+@st.cache_resource
+def start_crypto_autonomous_runtime():
+    """
+    One autonomous crypto scanner/entry runtime per deployed service.
+
+    Architecture
+    ------------
+    Background thread
+        -> PostgreSQL advisory lock
+        -> scan_markets()
+        -> confirm_scanner_setup()
+        -> open_approved_trade()
+        -> PostgreSQL runtime snapshot
+
+    The Streamlit UI only reads the snapshot.
+    """
+
+    database_url = os.environ.get(
+        "DATABASE_URL",
+        "",
+    ).strip()
+
+    state = {
+        "started": False,
+        "thread_alive": False,
+        "lock_acquired": False,
+        "last_error": None,
+        "last_scan_at": None,
+        "runtime_version": "V5.3",
+    }
+
+    if not database_url:
+        state["last_error"] = "DATABASE_URL is not configured"
+        print(
+            "[CRYPTO AUTONOMOUS] DATABASE_URL is not configured.",
+            flush=True,
+        )
+        return state
+
+    def log(message: Any) -> None:
+        print(
+            f"[CRYPTO AUTONOMOUS] {message}",
+            flush=True,
+        )
+
+    def publish_snapshot(
+        *,
+        status: str,
+        market: str = "—",
+        signal: str = "NO TRADE",
+        score: float = 0.0,
+        confidence: float = 0.0,
+        reason: str = "",
+        scanner_results: Optional[list] = None,
+        strategy: Optional[Dict[str, Any]] = None,
+        execution: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        write_runtime_state(
+            "crypto_runtime",
+            {
+                "runtime_version": "V5.3",
+                "status": status,
+                "market": market,
+                "signal": signal,
+                "score": safe_float(score),
+                "confidence": safe_float(confidence),
+                "reason": str(reason or ""),
+                "scanner_results": scanner_results or [],
+                "strategy": strategy or {},
+                "execution": execution or {},
+                "paper_only": True,
+                "real_execution": False,
+                "updated_at": utc_now().isoformat(),
+            },
+        )
+
+    def run_one_scan(
+        trader: PaperTrader,
+    ) -> None:
+        control = get_crypto_control()
+
+        if bool(control.get("paused", False)):
+            publish_snapshot(
+                status="PAUSED",
+                reason="Crypto autonomous runtime paused by operator.",
+            )
+            return
+
+        position = trader.get_position(
+            CRYPTO_SLOT
+        )
+
+        if position:
+            publish_snapshot(
+                status="POSITION OPEN · LIFECYCLE MANAGED",
+                market=position.get("symbol", "—"),
+                signal=position.get("signal", position.get("side", "NO TRADE")),
+                reason=(
+                    "Open Crypto position is managed by "
+                    "the autonomous lifecycle runtime."
+                ),
+            )
+            return
+
+        log(
+            f"Scanning {len(SCAN_MARKETS)} crypto markets."
+        )
+
+        results = scan_markets()
+
+        if not isinstance(results, list):
+            results = []
+
+        summary = scanner_summary(results) or {}
+
+        strongest = summary.get(
+            "strongest_market"
+        ) or {}
+
+        best_setup = summary.get(
+            "best_setup"
+        )
+
+        market = strongest.get(
+            "symbol",
+            "—",
+        )
+
+        signal = strongest.get(
+            "signal",
+            "NO TRADE",
+        )
+
+        score = safe_float(
+            strongest.get(
+                "score"
+            )
+        )
+
+        reason = strongest.get(
+            "reason",
+            "",
+        )
+
+        if best_setup is None:
+            publish_snapshot(
+                status="NO QUALIFYING TRADE",
+                market=market,
+                signal=signal,
+                score=score,
+                confidence=0.0,
+                reason=reason or "Scanner found no qualifying setup.",
+                scanner_results=results,
+            )
+            return
+
+        confirmation = confirm_scanner_setup(
+            best_setup
+        ) or {}
+
+        market = best_setup.get(
+            "symbol",
+            market,
+        )
+
+        signal = best_setup.get(
+            "signal",
+            signal,
+        )
+
+        score = safe_float(
+            best_setup.get(
+                "score",
+                score,
+            )
+        )
+
+        confidence = safe_float(
+            confirmation.get(
+                "confidence"
+            )
+        )
+
+        reason = confirmation.get(
+            "reason",
+            reason,
+        )
+
+        if not confirmation.get(
+            "approved",
+            False,
+        ):
+            publish_snapshot(
+                status="WAITING FOR V5 CONFIRMATION",
+                market=market,
+                signal=signal,
+                score=score,
+                confidence=confidence,
+                reason=reason,
+                scanner_results=results,
+                strategy=confirmation,
+            )
+            return
+
+        execution_setup = dict(
+            best_setup
+        )
+
+        execution_setup[
+            "strategy_confirmation"
+        ] = confirmation
+
+        execution = open_approved_trade(
+            trader=trader,
+            setup=execution_setup,
+        )
+
+        if not isinstance(
+            execution,
+            dict,
+        ):
+            execution = {
+                "status": "ERROR",
+                "reason": "Execution engine returned invalid result.",
+            }
+
+        execution_status = str(
+            execution.get(
+                "status",
+                "UNKNOWN",
+            )
+        ).upper()
+
+        execution_reason = str(
+            execution.get(
+                "reason",
+                reason,
+            )
+            or reason
+        )
+
+        if execution_status == "EXECUTED":
+            ui_status = "PAPER TRADE OPENED"
+
+        elif execution_status in (
+            "RISK_BLOCKED",
+            "RISK_PLAN_REJECTED",
+            "REJECTED",
+        ):
+            ui_status = "TRADE REJECTED BY RISK"
+
+        elif execution_status == "STRATEGY_REJECTED":
+            ui_status = "WAITING FOR V5 STRATEGY"
+
+        elif execution_status == "STALE_ENTRY":
+            ui_status = "STALE ENTRY SKIPPED"
+
+        elif execution_status == "SKIPPED":
+            ui_status = "TRADE SKIPPED"
+
+        elif execution_status == "ERROR":
+            ui_status = "ERROR"
+
+        else:
+            ui_status = execution_status
+
+        publish_snapshot(
+            status=ui_status,
+            market=market,
+            signal=signal,
+            score=score,
+            confidence=confidence,
+            reason=execution_reason,
+            scanner_results=results,
+            strategy=confirmation,
+            execution=execution,
+        )
+
+        log(
+            f"{market} | {signal} | "
+            f"confidence={confidence:.1f}% | "
+            f"execution={execution_status}"
+        )
+
+    def worker_loop() -> None:
+        lock_connection = None
+        trader = None
+        state["thread_alive"] = True
+
+        try:
+            lock_connection = psycopg.connect(
+                database_url,
+                autocommit=True,
+                connect_timeout=10,
+            )
+
+            with lock_connection.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_try_advisory_lock(%s)",
+                    (CRYPTO_RUNTIME_LOCK_ID,),
+                )
+                row = cur.fetchone()
+
+            if not bool(row and row[0]):
+                state["last_error"] = "LOCK_NOT_ACQUIRED"
+                log(
+                    "Another Crypto runtime owns the PostgreSQL "
+                    "advisory lock. This process stays idle."
+                )
+                return
+
+            state["lock_acquired"] = True
+            log("PostgreSQL advisory lock acquired.")
+
+            trader = PaperTrader(
+                starting_balance=PAPER_BALANCE
+            )
+
+            last_scan_monotonic = 0.0
+            last_force_nonce = ""
+
+            while True:
+                try:
+                    control = get_crypto_control()
+                    force_nonce = str(
+                        control.get(
+                            "force_nonce",
+                            "",
+                        )
+                        or ""
+                    )
+
+                    paused = bool(
+                        control.get(
+                            "paused",
+                            False,
+                        )
+                    )
+
+                    now_m = time.monotonic()
+
+                    force_requested = (
+                        bool(force_nonce)
+                        and force_nonce != last_force_nonce
+                    )
+
+                    regular_due = (
+                        last_scan_monotonic <= 0
+                        or (
+                            now_m - last_scan_monotonic
+                            >= CRYPTO_RUNTIME_POLL_SECONDS
+                        )
+                    )
+
+                    if paused:
+                        publish_snapshot(
+                            status="PAUSED",
+                            reason=(
+                                "Crypto autonomous runtime "
+                                "paused by operator."
+                            ),
+                        )
+
+                        if force_requested:
+                            last_force_nonce = force_nonce
+
+                        time.sleep(
+                            CRYPTO_RUNTIME_IDLE_CHECK_SECONDS
+                        )
+                        continue
+
+                    if force_requested or regular_due:
+                        run_one_scan(
+                            trader
+                        )
+
+                        last_scan_monotonic = time.monotonic()
+                        state["last_scan_at"] = utc_now().isoformat()
+                        state["last_error"] = None
+
+                        if force_requested:
+                            last_force_nonce = force_nonce
+
+                    time.sleep(
+                        CRYPTO_RUNTIME_IDLE_CHECK_SECONDS
+                    )
+
+                except Exception as error:
+                    state["last_error"] = str(error)
+
+                    log(
+                        f"Cycle error: {error}"
+                    )
+
+                    publish_snapshot(
+                        status="ERROR",
+                        reason=f"Crypto autonomous runtime error: {error}",
+                    )
+
+                    time.sleep(10)
+
+        except Exception as error:
+            state["last_error"] = str(error)
+
+            log(
+                f"Startup error: {error}"
+            )
+
+            publish_snapshot(
+                status="ERROR",
+                reason=f"Crypto autonomous startup error: {error}",
+            )
+
+        finally:
+            if lock_connection is not None:
+                try:
+                    with lock_connection.cursor() as cur:
+                        cur.execute(
+                            "SELECT pg_advisory_unlock(%s)",
+                            (CRYPTO_RUNTIME_LOCK_ID,),
+                        )
+                except Exception:
+                    pass
+
+                try:
+                    lock_connection.close()
+                except Exception:
+                    pass
+
+            state["lock_acquired"] = False
+            state["thread_alive"] = False
+
+            log("Runtime stopped.")
+
+    ensure_runtime_state_schema()
+
+    # Initialize persistent controls exactly once.
+    existing_control = read_runtime_state(
+        "crypto_control",
+        {},
+    )
+
+    if not existing_control:
+        write_runtime_state(
+            "crypto_control",
+            {
+                "paused": False,
+                "force_nonce": "",
+            },
+        )
+
+    thread = threading.Thread(
+        target=worker_loop,
+        name="crypto-autonomous-v5-3",
+        daemon=True,
+    )
+
+    thread.start()
+
+    state["started"] = True
+
+    return state
+
+
+_crypto_autonomous_runtime_state = (
+    start_crypto_autonomous_runtime()
+)
+
 
 # ============================================================
 # V5 EMBEDDED METALS AUTO BOOTSTRAP
