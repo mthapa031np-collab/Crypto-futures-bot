@@ -1,7 +1,7 @@
 """
 app.py
 
-PRO AI QUANT TERMINAL V5.1 FAST UI
+PRO AI QUANT TERMINAL V5.2 FAST DISPLAY
 Institutional multi-asset paper-trading terminal.
 
 Design goals
@@ -96,12 +96,12 @@ except Exception as _health_import_error:
 # PLATFORM CONSTANTS
 # ============================================================
 
-PLATFORM_VERSION = "V5.1-FAST"
+PLATFORM_VERSION = "V5.2-FAST-DISPLAY"
 PAPER_ONLY = True
 REAL_EXECUTION_ENABLED = False
 METALS_SCAN_SECONDS = 300
 CRYPTO_SCAN_SECONDS = max(30, int(os.environ.get("CRYPTO_SCAN_SECONDS", "60")))
-UI_REFRESH_SECONDS = max(15, int(os.environ.get("UI_REFRESH_SECONDS", "15")))
+UI_REFRESH_SECONDS = max(30, int(os.environ.get("UI_REFRESH_SECONDS", "30")))
 CORE_TICKERS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
 NAV_ITEMS = [
     "Command",
@@ -883,9 +883,12 @@ def live_terminal() -> None:
     update_daily_risk()
     publish_web_heartbeat()
 
+    # V5.2 FAST DISPLAY MODE:
+    # Never run scanners/trading engines from a Streamlit UI refresh.
+    # Manual FORCE buttons remain available. Autonomous lifecycle and
+    # metals bootstrap runtimes continue independently.
     if PAPER_TRADING:
-        run_crypto_cycle()
-        run_parallel_metals_cycle()
+        pass
 
     balance = safe_float(trader.get_balance())
     history = trader.get_trade_history()
