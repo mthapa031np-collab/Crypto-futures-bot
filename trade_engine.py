@@ -1371,6 +1371,15 @@ def open_approved_trade(
         "approved",
         False,
     ):
+        print(
+            "[PORTFOLIO RISK BLOCK] "
+            f"{symbol} | "
+            f"status={governor.get('status')} | "
+            f"reason={governor.get('reason')} | "
+            f"details={governor}",
+            flush=True,
+        )
+
         return {
             "status": "RISK_BLOCKED",
             "reason": governor.get(
