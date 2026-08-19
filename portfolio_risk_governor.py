@@ -1,15 +1,19 @@
 """
 portfolio_risk_governor.py
 
-PRO AI QUANT TERMINAL V4.0
+PRO AI QUANT TERMINAL V5.0
 UNIFIED MULTI-ASSET PORTFOLIO RISK GOVERNOR
 
 Purpose
 -------
 Central account-level risk authority for:
+
     - CRYPTO
     - METALS
-    - Future STOCKS / INDICES / FX modules
+    - Future STOCKS
+    - Future INDICES
+    - Future FX
+    - Future FUTURES / CFD adapters
 
 Architecture
 ------------
@@ -21,35 +25,63 @@ Portfolio Risk Governor
         ↓
 PaperTrader
 
-The governor DOES NOT place trades.
-It only answers:
+The governor NEVER places trades.
+
+It only returns:
+
     APPROVED
     or
     BLOCKED
 
-Safety goals
-------------
-- PAPER ONLY
-- Real execution hard locked
-- Max total positions
-- Slot protection
-- Daily realized loss protection
-- Total account drawdown protection
-- Portfolio open-risk cap
-- Per-trade risk cap
-- Consecutive-loss circuit breaker
-- Trade cooldown
+V5 Design
+---------
+- Backward compatible with V4 callers
+- Persistent UTC day-start equity
+- Persistent account high-water mark
+- True peak-equity drawdown
+- Daily realized-loss protection
+- Daily equity-loss protection
+- Total portfolio open-risk cap
+- Per-asset risk caps
+- Side-aware stop validation
 - Duplicate symbol protection
-- Invalid TP/SL protection
-- Persistent state derived from PostgreSQL-backed PaperTrader
-- Future asset classes supported without core redesign
+- Slot protection
+- Consecutive-loss circuit breaker
+- Global cooldown
+- Finite-number validation
+- Risk contract adapter support
+- PostgreSQL decision audit trail
+- Restart-safe state
+- PAPER ONLY
+- REAL EXECUTION HARD LOCKED
+
+Important
+---------
+This module DOES NOT execute orders.
+
+Every trade engine should call:
+
+    authorize_trade(...)
+
+before:
+
+    trader.open_trade(...)
+
+Safety
+------
+PAPER ONLY
+REAL ORDERS DISABLED
 """
 
 from __future__ import annotations
 
+import math
 import os
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
+
+import psycopg
+from psycopg.rows import dict_row
 
 from paper_trader import (
     CRYPTO_SLOT,
@@ -58,90 +90,224 @@ from paper_trader import (
 
 
 # ============================================================
+# VERSION
+# ============================================================
+
+ENGINE_VERSION = "V5.0 Portfolio Risk Governor"
+
+
+# ============================================================
 # HARD SAFETY MODE
 # ============================================================
 
 PAPER_ONLY = True
+
 REAL_EXECUTION_ENABLED = False
+
+
+# ============================================================
+# DATABASE
+# ============================================================
+
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "",
+).strip()
+
+
+# ============================================================
+# ENV HELPERS
+# ============================================================
+
+def _env_float(
+    name: str,
+    default: float,
+    *,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+) -> float:
+
+    raw = os.environ.get(
+        name,
+        str(default),
+    )
+
+    try:
+        value = float(
+            raw
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        value = float(
+            default
+        )
+
+    if not math.isfinite(
+        value
+    ):
+        value = float(
+            default
+        )
+
+    if (
+        minimum is not None
+        and value < minimum
+    ):
+        value = minimum
+
+    if (
+        maximum is not None
+        and value > maximum
+    ):
+        value = maximum
+
+    return value
+
+
+def _env_int(
+    name: str,
+    default: int,
+    *,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> int:
+
+    raw = os.environ.get(
+        name,
+        str(default),
+    )
+
+    try:
+        value = int(
+            raw
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        value = int(
+            default
+        )
+
+    if (
+        minimum is not None
+        and value < minimum
+    ):
+        value = minimum
+
+    if (
+        maximum is not None
+        and value > maximum
+    ):
+        value = maximum
+
+    return value
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-MAX_DAILY_LOSS_PCT = float(
-    os.environ.get(
-        "MAX_DAILY_LOSS_PCT",
-        "5.0",
-    )
+MAX_DAILY_LOSS_PCT = _env_float(
+    "MAX_DAILY_LOSS_PCT",
+    5.0,
+    minimum=0.1,
+    maximum=100.0,
 )
 
-MAX_TOTAL_DRAWDOWN_PCT = float(
-    os.environ.get(
-        "MAX_TOTAL_DRAWDOWN_PCT",
-        "10.0",
-    )
+MAX_TOTAL_DRAWDOWN_PCT = _env_float(
+    "MAX_TOTAL_DRAWDOWN_PCT",
+    10.0,
+    minimum=0.1,
+    maximum=100.0,
 )
 
-MAX_PORTFOLIO_RISK_PCT = float(
-    os.environ.get(
-        "MAX_PORTFOLIO_RISK_PCT",
-        "3.0",
-    )
+MAX_PORTFOLIO_RISK_PCT = _env_float(
+    "MAX_PORTFOLIO_RISK_PCT",
+    3.0,
+    minimum=0.1,
+    maximum=100.0,
 )
 
-MAX_TOTAL_OPEN_POSITIONS = int(
-    os.environ.get(
-        "MAX_TOTAL_OPEN_POSITIONS",
-        "2",
-    )
+MAX_TOTAL_OPEN_POSITIONS = _env_int(
+    "MAX_TOTAL_OPEN_POSITIONS",
+    2,
+    minimum=1,
 )
 
-MAX_CRYPTO_POSITIONS = int(
-    os.environ.get(
-        "MAX_CRYPTO_POSITIONS",
-        "1",
-    )
+MAX_CRYPTO_POSITIONS = _env_int(
+    "MAX_CRYPTO_POSITIONS",
+    1,
+    minimum=0,
 )
 
-MAX_METALS_POSITIONS = int(
-    os.environ.get(
-        "MAX_METALS_POSITIONS",
-        "1",
-    )
+MAX_METALS_POSITIONS = _env_int(
+    "MAX_METALS_POSITIONS",
+    1,
+    minimum=0,
 )
 
-MAX_CONSECUTIVE_LOSSES = int(
-    os.environ.get(
-        "MAX_CONSECUTIVE_LOSSES",
-        "3",
-    )
+MAX_CONSECUTIVE_LOSSES = _env_int(
+    "MAX_CONSECUTIVE_LOSSES",
+    3,
+    minimum=1,
 )
 
-GLOBAL_TRADE_COOLDOWN_SECONDS = int(
-    os.environ.get(
-        "GLOBAL_TRADE_COOLDOWN_SECONDS",
-        "300",
-    )
+GLOBAL_TRADE_COOLDOWN_SECONDS = _env_int(
+    "GLOBAL_TRADE_COOLDOWN_SECONDS",
+    300,
+    minimum=0,
 )
 
-MAX_CRYPTO_RISK_PCT = float(
-    os.environ.get(
-        "MAX_CRYPTO_RISK_PCT",
-        "1.0",
-    )
+MAX_CRYPTO_RISK_PCT = _env_float(
+    "MAX_CRYPTO_RISK_PCT",
+    1.0,
+    minimum=0.01,
+    maximum=100.0,
 )
 
-MAX_METALS_RISK_PCT = float(
-    os.environ.get(
-        "MAX_METALS_RISK_PCT",
-        "1.0",
-    )
+MAX_METALS_RISK_PCT = _env_float(
+    "MAX_METALS_RISK_PCT",
+    1.0,
+    minimum=0.01,
+    maximum=100.0,
+)
+
+MAX_STOCK_RISK_PCT = _env_float(
+    "MAX_STOCK_RISK_PCT",
+    1.0,
+    minimum=0.01,
+    maximum=100.0,
+)
+
+MAX_FX_RISK_PCT = _env_float(
+    "MAX_FX_RISK_PCT",
+    1.0,
+    minimum=0.01,
+    maximum=100.0,
+)
+
+MAX_INDEX_RISK_PCT = _env_float(
+    "MAX_INDEX_RISK_PCT",
+    1.0,
+    minimum=0.01,
+    maximum=100.0,
+)
+
+MAX_FUTURES_RISK_PCT = _env_float(
+    "MAX_FUTURES_RISK_PCT",
+    1.0,
+    minimum=0.01,
+    maximum=100.0,
 )
 
 
 # ============================================================
-# SUPPORTED ASSET CLASSES
+# ASSET CLASS SUPPORT
 # ============================================================
 
 ASSET_SLOT_MAP = {
@@ -156,9 +322,37 @@ ASSET_SLOT_MAP = {
 }
 
 
+ASSET_RISK_LIMITS = {
+    "CRYPTO":
+        MAX_CRYPTO_RISK_PCT,
+
+    "METAL":
+        MAX_METALS_RISK_PCT,
+
+    "STOCK":
+        MAX_STOCK_RISK_PCT,
+
+    "FX":
+        MAX_FX_RISK_PCT,
+
+    "INDEX":
+        MAX_INDEX_RISK_PCT,
+
+    "FUTURES":
+        MAX_FUTURES_RISK_PCT,
+}
+
+
 # ============================================================
-# HELPERS
+# BASIC HELPERS
 # ============================================================
+
+def _utc_now() -> datetime:
+
+    return datetime.now(
+        timezone.utc
+    )
+
 
 def _safe_float(
     value,
@@ -174,7 +368,9 @@ def _safe_float(
             value
         )
 
-        if number != number:
+        if not math.isfinite(
+            number
+        ):
             return default
 
         return number
@@ -182,21 +378,31 @@ def _safe_float(
     except (
         TypeError,
         ValueError,
+        OverflowError,
     ):
 
         return default
 
 
-def _utc_now():
+def _safe_positive_float(
+    value,
+    default=0.0,
+):
 
-    return datetime.now(
-        timezone.utc
+    number = _safe_float(
+        value,
+        default,
     )
+
+    if number <= 0:
+        return default
+
+    return number
 
 
 def _parse_datetime(
     value,
-):
+) -> Optional[datetime]:
 
     if not value:
         return None
@@ -231,16 +437,19 @@ def _parse_datetime(
             tzinfo=timezone.utc
         )
 
-    return dt
+    return dt.astimezone(
+        timezone.utc
+    )
 
 
 def _normalize_symbol(
     symbol,
-):
+) -> str:
 
     return (
         str(
             symbol
+            or ""
         )
         .upper()
         .replace("/", "")
@@ -252,20 +461,75 @@ def _normalize_symbol(
 
 def _normalize_asset_class(
     asset_class,
-):
+) -> str:
 
     value = (
         str(
             asset_class
+            or ""
         )
         .upper()
         .strip()
     )
 
-    if value == "METALS":
-        return "METAL"
+    aliases = {
+        "METALS":
+            "METAL",
 
-    return value
+        "EQUITY":
+            "STOCK",
+
+        "EQUITIES":
+            "STOCK",
+
+        "FOREX":
+            "FX",
+
+        "INDICES":
+            "INDEX",
+
+        "FUTURE":
+            "FUTURES",
+    }
+
+    return aliases.get(
+        value,
+        value,
+    )
+
+
+def _normalize_side(
+    side,
+) -> Optional[str]:
+
+    if side is None:
+        return None
+
+    value = (
+        str(
+            side
+        )
+        .upper()
+        .strip()
+    )
+
+    aliases = {
+        "BUY":
+            "LONG",
+
+        "LONG":
+            "LONG",
+
+        "SELL":
+            "SHORT",
+
+        "SHORT":
+            "SHORT",
+    }
+
+    return aliases.get(
+        value
+    )
 
 
 def _asset_slot(
@@ -282,19 +546,255 @@ def _asset_slot(
 
 
 # ============================================================
+# DATABASE CONNECTION
+# ============================================================
+
+def _connect():
+
+    if not DATABASE_URL:
+
+        raise RuntimeError(
+            "DATABASE_URL is not configured."
+        )
+
+    return psycopg.connect(
+        DATABASE_URL,
+        row_factory=dict_row,
+        connect_timeout=10,
+    )
+
+
+# ============================================================
+# DATABASE TABLES
+# ============================================================
+
+def ensure_risk_governor_tables():
+
+    if not DATABASE_URL:
+        return
+
+    with _connect() as conn:
+
+        with conn.cursor() as cur:
+
+            # ------------------------------------------------
+            # PERSISTENT ACCOUNT RISK STATE
+            # ------------------------------------------------
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS
+                portfolio_risk_state (
+
+                    state_key TEXT PRIMARY KEY,
+
+                    utc_date DATE,
+
+                    day_start_equity
+                        DOUBLE PRECISION,
+
+                    high_water_equity
+                        DOUBLE PRECISION,
+
+                    last_balance
+                        DOUBLE PRECISION,
+
+                    updated_at
+                        TIMESTAMPTZ
+                        NOT NULL
+                        DEFAULT NOW()
+                )
+                """
+            )
+
+            # ------------------------------------------------
+            # DECISION AUDIT
+            # ------------------------------------------------
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS
+                portfolio_risk_decisions (
+
+                    id BIGSERIAL
+                        PRIMARY KEY,
+
+                    decided_at
+                        TIMESTAMPTZ
+                        NOT NULL
+                        DEFAULT NOW(),
+
+                    approved
+                        BOOLEAN
+                        NOT NULL,
+
+                    status
+                        TEXT
+                        NOT NULL,
+
+                    reason
+                        TEXT,
+
+                    asset_class
+                        TEXT,
+
+                    symbol
+                        TEXT,
+
+                    side
+                        TEXT,
+
+                    entry_price
+                        DOUBLE PRECISION,
+
+                    stop_loss
+                        DOUBLE PRECISION,
+
+                    quantity
+                        DOUBLE PRECISION,
+
+                    proposed_risk_amount
+                        DOUBLE PRECISION,
+
+                    proposed_risk_pct
+                        DOUBLE PRECISION,
+
+                    projected_portfolio_risk_pct
+                        DOUBLE PRECISION,
+
+                    balance
+                        DOUBLE PRECISION
+                )
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_portfolio_risk_decisions_time
+
+                ON portfolio_risk_decisions (
+                    decided_at DESC
+                )
+                """
+            )
+
+        conn.commit()
+
+
+# ============================================================
+# PERSISTENT STATE
+# ============================================================
+
+def _load_risk_state() -> Optional[Dict]:
+
+    if not DATABASE_URL:
+
+        return None
+
+    ensure_risk_governor_tables()
+
+    with _connect() as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    state_key,
+                    utc_date,
+                    day_start_equity,
+                    high_water_equity,
+                    last_balance,
+                    updated_at
+
+                FROM portfolio_risk_state
+
+                WHERE state_key = 'GLOBAL'
+                """
+            )
+
+            return cur.fetchone()
+
+
+def _save_risk_state(
+    *,
+    utc_date,
+    day_start_equity,
+    high_water_equity,
+    last_balance,
+):
+
+    if not DATABASE_URL:
+        return
+
+    ensure_risk_governor_tables()
+
+    with _connect() as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                INSERT INTO
+                portfolio_risk_state (
+
+                    state_key,
+                    utc_date,
+                    day_start_equity,
+                    high_water_equity,
+                    last_balance,
+                    updated_at
+                )
+
+                VALUES (
+                    'GLOBAL',
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    NOW()
+                )
+
+                ON CONFLICT (
+                    state_key
+                )
+
+                DO UPDATE SET
+
+                    utc_date =
+                        EXCLUDED.utc_date,
+
+                    day_start_equity =
+                        EXCLUDED.day_start_equity,
+
+                    high_water_equity =
+                        EXCLUDED.high_water_equity,
+
+                    last_balance =
+                        EXCLUDED.last_balance,
+
+                    updated_at =
+                        NOW()
+                """,
+                (
+                    utc_date,
+                    day_start_equity,
+                    high_water_equity,
+                    last_balance,
+                ),
+            )
+
+        conn.commit()
+
+
+# ============================================================
 # ACCOUNT BASELINE
 # ============================================================
 
 def get_account_baseline(
     trader,
 ) -> Dict:
-
-    """
-    Uses persistent PaperTrader account state.
-
-    Current balance is available through trader.get_balance().
-    Starting balance is retained by PaperTrader itself.
-    """
 
     balance = _safe_float(
         trader.get_balance()
@@ -312,12 +812,129 @@ def get_account_baseline(
 
         starting_balance = balance
 
+    today = (
+        _utc_now()
+        .date()
+    )
+
+    state = None
+
+    try:
+
+        state = (
+            _load_risk_state()
+        )
+
+    except Exception:
+
+        state = None
+
+    # --------------------------------------------------------
+    # FIRST RUN
+    # --------------------------------------------------------
+
+    if not state:
+
+        day_start_equity = (
+            balance
+        )
+
+        high_water_equity = max(
+            starting_balance,
+            balance,
+        )
+
+        try:
+
+            _save_risk_state(
+                utc_date=today,
+                day_start_equity=
+                    day_start_equity,
+                high_water_equity=
+                    high_water_equity,
+                last_balance=
+                    balance,
+            )
+
+        except Exception:
+
+            pass
+
+    else:
+
+        stored_date = (
+            state.get(
+                "utc_date"
+            )
+        )
+
+        stored_day_start = _safe_float(
+            state.get(
+                "day_start_equity"
+            )
+        )
+
+        stored_high_water = _safe_float(
+            state.get(
+                "high_water_equity"
+            )
+        )
+
+        # ----------------------------------------------------
+        # NEW UTC DAY
+        # ----------------------------------------------------
+
+        if stored_date != today:
+
+            day_start_equity = (
+                balance
+            )
+
+        else:
+
+            day_start_equity = (
+                stored_day_start
+                if stored_day_start > 0
+                else balance
+            )
+
+        high_water_equity = max(
+            stored_high_water,
+            starting_balance,
+            balance,
+        )
+
+        try:
+
+            _save_risk_state(
+                utc_date=today,
+                day_start_equity=
+                    day_start_equity,
+                high_water_equity=
+                    high_water_equity,
+                last_balance=
+                    balance,
+            )
+
+        except Exception:
+
+            pass
+
     return {
         "balance":
             balance,
 
         "starting_balance":
             starting_balance,
+
+        "day_start_equity":
+            day_start_equity,
+
+        "high_water_equity":
+            high_water_equity,
+
+        "utc_date":
+            today.isoformat(),
     }
 
 
@@ -327,7 +944,7 @@ def get_account_baseline(
 
 def _history(
     trader,
-):
+) -> List[Dict]:
 
     try:
 
@@ -346,7 +963,33 @@ def _history(
 
         return []
 
-    return history
+    # --------------------------------------------------------
+    # DO NOT TRUST SOURCE ORDER
+    # --------------------------------------------------------
+
+    def sort_key(
+        trade,
+    ):
+
+        closed = _parse_datetime(
+            trade.get(
+                "closed_at"
+            )
+        )
+
+        if closed is None:
+
+            return datetime.min.replace(
+                tzinfo=timezone.utc
+            )
+
+        return closed
+
+    return sorted(
+        history,
+        key=sort_key,
+        reverse=True,
+    )
 
 
 # ============================================================
@@ -363,6 +1006,7 @@ def get_daily_realized_pnl(
     )
 
     total = 0.0
+
     trades = 0
 
     for trade in _history(
@@ -417,7 +1061,6 @@ def get_consecutive_losses(
         trader
     )
 
-    # get_trade_history() is newest first.
     for trade in history:
 
         pnl = _safe_float(
@@ -537,6 +1180,86 @@ def get_global_cooldown(
 
 
 # ============================================================
+# RISK CONTRACT ADAPTER
+# ============================================================
+
+def calculate_contract_risk_amount(
+    *,
+    entry_price,
+    stop_loss,
+    quantity,
+    contract_multiplier=1.0,
+    point_value=1.0,
+    fx_rate=1.0,
+) -> float:
+
+    entry_price = _safe_positive_float(
+        entry_price
+    )
+
+    stop_loss = _safe_positive_float(
+        stop_loss
+    )
+
+    quantity = _safe_positive_float(
+        quantity
+    )
+
+    contract_multiplier = (
+        _safe_positive_float(
+            contract_multiplier,
+            1.0,
+        )
+    )
+
+    point_value = (
+        _safe_positive_float(
+            point_value,
+            1.0,
+        )
+    )
+
+    fx_rate = (
+        _safe_positive_float(
+            fx_rate,
+            1.0,
+        )
+    )
+
+    if (
+        entry_price <= 0
+        or stop_loss <= 0
+        or quantity <= 0
+    ):
+
+        return 0.0
+
+    price_distance = abs(
+        entry_price
+        - stop_loss
+    )
+
+    risk_amount = (
+        price_distance
+        * quantity
+        * contract_multiplier
+        * point_value
+        * fx_rate
+    )
+
+    if not math.isfinite(
+        risk_amount
+    ):
+
+        return 0.0
+
+    return max(
+        0.0,
+        risk_amount,
+    )
+
+
+# ============================================================
 # POSITION RISK
 # ============================================================
 
@@ -548,40 +1271,39 @@ def calculate_position_risk_amount(
 
         return 0.0
 
-    entry = _safe_float(
-        position.get(
-            "entry_price"
-        )
-    )
+    return calculate_contract_risk_amount(
+        entry_price=
+            position.get(
+                "entry_price"
+            ),
 
-    stop = _safe_float(
-        position.get(
-            "stop_loss"
-        )
-    )
+        stop_loss=
+            position.get(
+                "stop_loss"
+            ),
 
-    quantity = _safe_float(
-        position.get(
-            "quantity"
-        )
-    )
+        quantity=
+            position.get(
+                "quantity"
+            ),
 
-    if (
-        entry <= 0
-        or stop <= 0
-        or quantity <= 0
-    ):
+        contract_multiplier=
+            position.get(
+                "contract_multiplier",
+                1.0,
+            ),
 
-        return 0.0
+        point_value=
+            position.get(
+                "point_value",
+                1.0,
+            ),
 
-    distance = abs(
-        entry
-        - stop
-    )
-
-    return (
-        distance
-        * quantity
+        fx_rate=
+            position.get(
+                "fx_rate",
+                1.0,
+            ),
     )
 
 
@@ -615,6 +1337,7 @@ def get_open_portfolio_risk(
     )
 
     total_risk = 0.0
+
     details = []
 
     for position in positions:
@@ -644,6 +1367,11 @@ def get_open_portfolio_risk(
                 "symbol":
                     position.get(
                         "symbol"
+                    ),
+
+                "side":
+                    position.get(
+                        "side"
                     ),
 
                 "risk_amount":
@@ -678,7 +1406,7 @@ def get_open_portfolio_risk(
 
 
 # ============================================================
-# DRAWDOWN
+# TRUE HIGH-WATER DRAWDOWN
 # ============================================================
 
 def get_account_drawdown(
@@ -691,33 +1419,42 @@ def get_account_drawdown(
         )
     )
 
-    starting = baseline[
-        "starting_balance"
-    ]
+    high_water = (
+        baseline[
+            "high_water_equity"
+        ]
+    )
 
-    balance = baseline[
-        "balance"
-    ]
+    balance = (
+        baseline[
+            "balance"
+        ]
+    )
 
     drawdown_amount = max(
         0.0,
-        starting
+        high_water
         - balance,
     )
 
     drawdown_pct = 0.0
 
-    if starting > 0:
+    if high_water > 0:
 
         drawdown_pct = (
             drawdown_amount
-            / starting
+            / high_water
             * 100
         )
 
     return {
         "starting_balance":
-            starting,
+            baseline[
+                "starting_balance"
+            ],
+
+        "high_water_equity":
+            high_water,
 
         "balance":
             balance,
@@ -731,67 +1468,117 @@ def get_account_drawdown(
 
 
 # ============================================================
-# DAILY LOSS %
+# DAILY LOSS STATUS
 # ============================================================
 
 def get_daily_loss_status(
     trader,
 ) -> Dict:
 
-    pnl_info = (
+    realized = (
         get_daily_realized_pnl(
             trader
         )
     )
 
-    balance_info = (
+    baseline = (
         get_account_baseline(
             trader
         )
     )
 
-    starting_balance = (
-        balance_info[
-            "starting_balance"
+    balance = (
+        baseline[
+            "balance"
         ]
     )
 
-    realized_pnl = (
-        pnl_info[
-            "realized_pnl"
+    day_start_equity = (
+        baseline[
+            "day_start_equity"
         ]
     )
 
-    loss_amount = max(
+    realized_loss_amount = max(
         0.0,
-        -realized_pnl,
+        -realized[
+            "realized_pnl"
+        ],
     )
 
-    loss_pct = 0.0
+    realized_loss_pct = 0.0
 
-    if starting_balance > 0:
+    if day_start_equity > 0:
 
-        loss_pct = (
-            loss_amount
-            / starting_balance
+        realized_loss_pct = (
+            realized_loss_amount
+            / day_start_equity
             * 100
         )
 
-    return {
-        "realized_pnl":
-            realized_pnl,
+    equity_loss_amount = max(
+        0.0,
+        day_start_equity
+        - balance,
+    )
 
-        "loss_amount":
-            loss_amount,
+    equity_loss_pct = 0.0
+
+    if day_start_equity > 0:
+
+        equity_loss_pct = (
+            equity_loss_amount
+            / day_start_equity
+            * 100
+        )
+
+    effective_loss_pct = max(
+        realized_loss_pct,
+        equity_loss_pct,
+    )
+
+    return {
+        "date":
+            baseline[
+                "utc_date"
+            ],
+
+        "day_start_equity":
+            day_start_equity,
+
+        "current_balance":
+            balance,
+
+        "realized_pnl":
+            realized[
+                "realized_pnl"
+            ],
+
+        "closed_trades":
+            realized[
+                "closed_trades"
+            ],
+
+        "realized_loss_amount":
+            realized_loss_amount,
+
+        "realized_loss_pct":
+            realized_loss_pct,
+
+        "equity_loss_amount":
+            equity_loss_amount,
+
+        "equity_loss_pct":
+            equity_loss_pct,
 
         "loss_pct":
-            loss_pct,
+            effective_loss_pct,
 
         "limit_pct":
             MAX_DAILY_LOSS_PCT,
 
         "blocked":
-            loss_pct
+            effective_loss_pct
             >= MAX_DAILY_LOSS_PCT,
     }
 
@@ -804,39 +1591,135 @@ def calculate_proposed_trade_risk(
     entry_price,
     stop_loss,
     quantity,
+    *,
+    contract_multiplier=1.0,
+    point_value=1.0,
+    fx_rate=1.0,
 ) -> float:
 
-    entry_price = _safe_float(
-        entry_price
-    )
+    return calculate_contract_risk_amount(
+        entry_price=
+            entry_price,
 
-    stop_loss = _safe_float(
-        stop_loss
-    )
+        stop_loss=
+            stop_loss,
 
-    quantity = _safe_float(
-        quantity
-    )
+        quantity=
+            quantity,
 
-    if (
-        entry_price <= 0
-        or stop_loss <= 0
-        or quantity <= 0
-    ):
+        contract_multiplier=
+            contract_multiplier,
 
-        return 0.0
+        point_value=
+            point_value,
 
-    return (
-        abs(
-            entry_price
-            - stop_loss
-        )
-        * quantity
+        fx_rate=
+            fx_rate,
     )
 
 
 # ============================================================
-# DUPLICATE SYMBOL CHECK
+# STRUCTURAL STOP VALIDATION
+# ============================================================
+
+def validate_stop_structure(
+    *,
+    side,
+    entry_price,
+    stop_loss,
+) -> Dict:
+
+    normalized_side = (
+        _normalize_side(
+            side
+        )
+    )
+
+    entry = _safe_positive_float(
+        entry_price
+    )
+
+    stop = _safe_positive_float(
+        stop_loss
+    )
+
+    if (
+        entry <= 0
+        or stop <= 0
+    ):
+
+        return {
+            "valid":
+                False,
+
+            "reason":
+                "Invalid entry or stop",
+        }
+
+    # --------------------------------------------------------
+    # BACKWARD COMPATIBILITY:
+    # Existing callers that do not supply side remain allowed.
+    # --------------------------------------------------------
+
+    if normalized_side is None:
+
+        return {
+            "valid":
+                True,
+
+            "side":
+                None,
+
+            "reason":
+                "Side not supplied; structural validation skipped",
+        }
+
+    if (
+        normalized_side == "LONG"
+        and stop >= entry
+    ):
+
+        return {
+            "valid":
+                False,
+
+            "side":
+                normalized_side,
+
+            "reason":
+                "LONG stop loss must be below entry",
+        }
+
+    if (
+        normalized_side == "SHORT"
+        and stop <= entry
+    ):
+
+        return {
+            "valid":
+                False,
+
+            "side":
+                normalized_side,
+
+            "reason":
+                "SHORT stop loss must be above entry",
+        }
+
+    return {
+        "valid":
+            True,
+
+        "side":
+            normalized_side,
+
+        "reason":
+            "Stop structure valid",
+    }
+
+
+# ============================================================
+# DUPLICATE SYMBOL
 # ============================================================
 
 def symbol_already_open(
@@ -844,8 +1727,10 @@ def symbol_already_open(
     symbol,
 ) -> bool:
 
-    symbol = _normalize_symbol(
-        symbol
+    symbol = (
+        _normalize_symbol(
+            symbol
+        )
     )
 
     try:
@@ -875,7 +1760,7 @@ def symbol_already_open(
 
 
 # ============================================================
-# POSITION LIMIT CHECK
+# POSITION LIMITS
 # ============================================================
 
 def _position_limits(
@@ -943,6 +1828,7 @@ def _position_limits(
     )
 
     blocked = False
+
     reason = None
 
     if (
@@ -951,6 +1837,7 @@ def _position_limits(
     ):
 
         blocked = True
+
         reason = (
             "Maximum total open positions reached"
         )
@@ -962,6 +1849,7 @@ def _position_limits(
     ):
 
         blocked = True
+
         reason = (
             "Maximum Crypto positions reached"
         )
@@ -973,6 +1861,7 @@ def _position_limits(
     ):
 
         blocked = True
+
         reason = (
             "Maximum Metals positions reached"
         )
@@ -996,6 +1885,179 @@ def _position_limits(
 
 
 # ============================================================
+# AUDIT DECISION
+# ============================================================
+
+def _audit_decision(
+    result: Dict,
+):
+
+    if not DATABASE_URL:
+        return
+
+    try:
+
+        ensure_risk_governor_tables()
+
+        with _connect() as conn:
+
+            with conn.cursor() as cur:
+
+                cur.execute(
+                    """
+                    INSERT INTO
+                    portfolio_risk_decisions (
+
+                        approved,
+                        status,
+                        reason,
+                        asset_class,
+                        symbol,
+                        side,
+                        entry_price,
+                        stop_loss,
+                        quantity,
+                        proposed_risk_amount,
+                        proposed_risk_pct,
+                        projected_portfolio_risk_pct,
+                        balance
+                    )
+
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    )
+                    """,
+                    (
+                        bool(
+                            result.get(
+                                "approved",
+                                False,
+                            )
+                        ),
+
+                        result.get(
+                            "status"
+                        ),
+
+                        result.get(
+                            "reason"
+                        ),
+
+                        result.get(
+                            "asset_class"
+                        ),
+
+                        result.get(
+                            "symbol"
+                        ),
+
+                        result.get(
+                            "side"
+                        ),
+
+                        result.get(
+                            "entry_price"
+                        ),
+
+                        result.get(
+                            "stop_loss"
+                        ),
+
+                        result.get(
+                            "quantity"
+                        ),
+
+                        result.get(
+                            "proposed_risk_amount"
+                        ),
+
+                        result.get(
+                            "proposed_risk_pct"
+                        ),
+
+                        result.get(
+                            "projected_portfolio_risk_pct"
+                        ),
+
+                        result.get(
+                            "balance"
+                        ),
+                    ),
+                )
+
+            conn.commit()
+
+    except Exception:
+
+        # Risk auditing must NEVER crash trade authorization.
+        pass
+
+
+# ============================================================
+# DECISION HELPER
+# ============================================================
+
+def _decision(
+    *,
+    approved: bool,
+    status: str,
+    reason: str,
+    **extra,
+) -> Dict:
+
+    result = {
+        "approved":
+            bool(
+                approved
+            ),
+
+        "status":
+            str(
+                status
+            ),
+
+        "reason":
+            str(
+                reason
+            ),
+
+        "engine":
+            ENGINE_VERSION,
+
+        "paper_only":
+            True,
+
+        "real_execution":
+            False,
+
+        "decided_at":
+            _utc_now().isoformat(),
+    }
+
+    result.update(
+        extra
+    )
+
+    _audit_decision(
+        result
+    )
+
+    return result
+
+
+# ============================================================
 # MASTER ENTRY AUTHORIZATION
 # ============================================================
 
@@ -1008,17 +2070,28 @@ def authorize_trade(
     stop_loss: float,
     quantity: float,
     risk_pct: Optional[float] = None,
+    side: Optional[str] = None,
+    contract_multiplier: float = 1.0,
+    point_value: float = 1.0,
+    fx_rate: float = 1.0,
 ) -> Dict:
 
     """
-    MASTER SAFETY GATE.
+    MASTER PORTFOLIO SAFETY GATE.
 
-    Every future trade engine should call this BEFORE
-    trader.open_trade().
+    Backward compatible with V4.
+
+    New V5 optional parameters:
+        side
+        contract_multiplier
+        point_value
+        fx_rate
+
+    Every trade engine should call this BEFORE trader.open_trade().
     """
 
     # --------------------------------------------------------
-    # ABSOLUTE EXECUTION LOCK
+    # HARD EXECUTION LOCK
     # --------------------------------------------------------
 
     if (
@@ -1026,16 +2099,14 @@ def authorize_trade(
         or REAL_EXECUTION_ENABLED
     ):
 
-        return {
-            "approved":
-                False,
-
-            "status":
-                "HARD_LOCK",
-
-            "reason":
-                "Real execution is disabled by Portfolio Risk Governor",
-        }
+        return _decision(
+            approved=False,
+            status="HARD_LOCK",
+            reason=(
+                "Real execution is disabled by "
+                "Portfolio Risk Governor"
+            ),
+        )
 
     asset_class = (
         _normalize_asset_class(
@@ -1049,42 +2120,79 @@ def authorize_trade(
         )
     )
 
+    normalized_side = (
+        _normalize_side(
+            side
+        )
+    )
+
     slot = (
         _asset_slot(
             asset_class
         )
     )
 
+    # --------------------------------------------------------
+    # ASSET SUPPORT
+    # --------------------------------------------------------
+
     if slot is None:
 
-        return {
-            "approved":
-                False,
-
-            "status":
+        return _decision(
+            approved=False,
+            status=
                 "UNSUPPORTED_ASSET_CLASS",
-
-            "reason":
-                (
-                    f"Unsupported asset class: "
-                    f"{asset_class}"
-                ),
-        }
+            reason=(
+                f"Unsupported active asset class: "
+                f"{asset_class}"
+            ),
+            asset_class=
+                asset_class,
+            symbol=
+                symbol,
+        )
 
     # --------------------------------------------------------
-    # VALID TRADE PARAMETERS
+    # VALID NUMERIC PARAMETERS
     # --------------------------------------------------------
 
-    entry_price = _safe_float(
-        entry_price
+    entry_price = (
+        _safe_positive_float(
+            entry_price
+        )
     )
 
-    stop_loss = _safe_float(
-        stop_loss
+    stop_loss = (
+        _safe_positive_float(
+            stop_loss
+        )
     )
 
-    quantity = _safe_float(
-        quantity
+    quantity = (
+        _safe_positive_float(
+            quantity
+        )
+    )
+
+    contract_multiplier = (
+        _safe_positive_float(
+            contract_multiplier,
+            1.0,
+        )
+    )
+
+    point_value = (
+        _safe_positive_float(
+            point_value,
+            1.0,
+        )
+    )
+
+    fx_rate = (
+        _safe_positive_float(
+            fx_rate,
+            1.0,
+        )
     )
 
     if (
@@ -1093,16 +2201,62 @@ def authorize_trade(
         or quantity <= 0
     ):
 
-        return {
-            "approved":
-                False,
+        return _decision(
+            approved=False,
+            status="INVALID_TRADE",
+            reason=(
+                "Invalid entry/stop/quantity"
+            ),
+            asset_class=
+                asset_class,
+            symbol=
+                symbol,
+            side=
+                normalized_side,
+        )
 
-            "status":
-                "INVALID_TRADE",
+    # --------------------------------------------------------
+    # STOP STRUCTURE
+    # --------------------------------------------------------
 
-            "reason":
-                "Invalid entry/stop/quantity",
-        }
+    stop_validation = (
+        validate_stop_structure(
+            side=
+                normalized_side,
+
+            entry_price=
+                entry_price,
+
+            stop_loss=
+                stop_loss,
+        )
+    )
+
+    if not stop_validation[
+        "valid"
+    ]:
+
+        return _decision(
+            approved=False,
+            status=
+                "INVALID_STOP_STRUCTURE",
+            reason=
+                stop_validation[
+                    "reason"
+                ],
+            asset_class=
+                asset_class,
+            symbol=
+                symbol,
+            side=
+                normalized_side,
+            entry_price=
+                entry_price,
+            stop_loss=
+                stop_loss,
+            quantity=
+                quantity,
+        )
 
     # --------------------------------------------------------
     # SLOT AVAILABILITY
@@ -1112,16 +2266,20 @@ def authorize_trade(
         slot
     ):
 
-        return {
-            "approved":
-                False,
-
-            "status":
-                "SLOT_OCCUPIED",
-
-            "reason":
-                f"{slot} already has an open position",
-        }
+        return _decision(
+            approved=False,
+            status="SLOT_OCCUPIED",
+            reason=(
+                f"{slot} already has "
+                "an open position"
+            ),
+            asset_class=
+                asset_class,
+            symbol=
+                symbol,
+            side=
+                normalized_side,
+        )
 
     # --------------------------------------------------------
     # DUPLICATE SYMBOL
@@ -1132,16 +2290,20 @@ def authorize_trade(
         symbol,
     ):
 
-        return {
-            "approved":
-                False,
-
-            "status":
+        return _decision(
+            approved=False,
+            status=
                 "DUPLICATE_SYMBOL",
-
-            "reason":
-                f"{symbol} is already open",
-        }
+            reason=(
+                f"{symbol} is already open"
+            ),
+            asset_class=
+                asset_class,
+            symbol=
+                symbol,
+            side=
+                normalized_side,
+        )
 
     # --------------------------------------------------------
     # POSITION LIMITS
@@ -1158,21 +2320,56 @@ def authorize_trade(
         "blocked"
     ]:
 
-        return {
-            "approved":
-                False,
-
-            "status":
+        return _decision(
+            approved=False,
+            status=
                 "POSITION_LIMIT",
-
-            "reason":
+            reason=
                 position_limits[
                     "reason"
                 ],
-
-            "position_limits":
+            asset_class=
+                asset_class,
+            symbol=
+                symbol,
+            side=
+                normalized_side,
+            position_limits=
                 position_limits,
-        }
+        )
+
+    # --------------------------------------------------------
+    # ACCOUNT BASELINE
+    # --------------------------------------------------------
+
+    baseline = (
+        get_account_baseline(
+            trader
+        )
+    )
+
+    balance = (
+        baseline[
+            "balance"
+        ]
+    )
+
+    if balance <= 0:
+
+        return _decision(
+            approved=False,
+            status=
+                "INVALID_BALANCE",
+            reason=(
+                "Invalid paper account balance"
+            ),
+            asset_class=
+                asset_class,
+            symbol=
+                symbol,
+            side=
+                normalized_side,
+        )
 
     # --------------------------------------------------------
     # DAILY LOSS CIRCUIT BREAKER
@@ -1188,24 +2385,27 @@ def authorize_trade(
         "blocked"
     ]:
 
-        return {
-            "approved":
-                False,
-
-            "status":
+        return _decision(
+            approved=False,
+            status=
                 "DAILY_LOSS_LOCK",
-
-            "reason":
-                (
-                    "Maximum daily loss limit reached"
-                ),
-
-            "daily_loss":
+            reason=(
+                "Maximum daily loss limit reached"
+            ),
+            asset_class=
+                asset_class,
+            symbol=
+                symbol,
+            side=
+                normalized_side,
+            daily_loss=
                 daily,
-        }
+            balance=
+                balance,
+        )
 
     # --------------------------------------------------------
-    # TOTAL DRAWDOWN CIRCUIT BREAKER
+    # TRUE ACCOUNT DRAWDOWN
     # --------------------------------------------------------
 
     drawdown = (
@@ -1221,22 +2421,27 @@ def authorize_trade(
         >= MAX_TOTAL_DRAWDOWN_PCT
     ):
 
-        return {
-            "approved":
-                False,
-
-            "status":
+        return _decision(
+            approved=False,
+            status=
                 "DRAWDOWN_LOCK",
-
-            "reason":
-                "Maximum account drawdown reached",
-
-            "drawdown":
+            reason=(
+                "Maximum account drawdown reached"
+            ),
+            asset_class=
+                asset_class,
+            symbol=
+                symbol,
+            side=
+                normalized_side,
+            drawdown=
                 drawdown,
-        }
+            balance=
+                balance,
+        )
 
     # --------------------------------------------------------
-    # CONSECUTIVE LOSS CIRCUIT BREAKER
+    # LOSS STREAK CIRCUIT BREAKER
     # --------------------------------------------------------
 
     consecutive_losses = (
@@ -1250,21 +2455,24 @@ def authorize_trade(
         >= MAX_CONSECUTIVE_LOSSES
     ):
 
-        return {
-            "approved":
-                False,
-
-            "status":
+        return _decision(
+            approved=False,
+            status=
                 "LOSS_STREAK_LOCK",
-
-            "reason":
-                (
-                    "Maximum consecutive losses reached"
-                ),
-
-            "consecutive_losses":
+            reason=(
+                "Maximum consecutive losses reached"
+            ),
+            asset_class=
+                asset_class,
+            symbol=
+                symbol,
+            side=
+                normalized_side,
+            consecutive_losses=
                 consecutive_losses,
-        }
+            balance=
+                balance,
+        )
 
     # --------------------------------------------------------
     # GLOBAL COOLDOWN
@@ -1280,19 +2488,24 @@ def authorize_trade(
         "active"
     ]:
 
-        return {
-            "approved":
-                False,
-
-            "status":
+        return _decision(
+            approved=False,
+            status=
                 "GLOBAL_COOLDOWN",
-
-            "reason":
-                "Portfolio cooldown is active",
-
-            "cooldown":
+            reason=(
+                "Portfolio cooldown is active"
+            ),
+            asset_class=
+                asset_class,
+            symbol=
+                symbol,
+            side=
+                normalized_side,
+            cooldown=
                 cooldown,
-        }
+            balance=
+                balance,
+        )
 
     # --------------------------------------------------------
     # PROPOSED TRADE RISK
@@ -1303,25 +2516,33 @@ def authorize_trade(
             entry_price,
             stop_loss,
             quantity,
+            contract_multiplier=
+                contract_multiplier,
+            point_value=
+                point_value,
+            fx_rate=
+                fx_rate,
         )
     )
 
-    balance = _safe_float(
-        trader.get_balance()
-    )
+    if proposed_risk_amount <= 0:
 
-    if balance <= 0:
-
-        return {
-            "approved":
-                False,
-
-            "status":
-                "INVALID_BALANCE",
-
-            "reason":
-                "Invalid paper account balance",
-        }
+        return _decision(
+            approved=False,
+            status=
+                "INVALID_RISK",
+            reason=(
+                "Calculated proposed risk is invalid"
+            ),
+            asset_class=
+                asset_class,
+            symbol=
+                symbol,
+            side=
+                normalized_side,
+            balance=
+                balance,
+        )
 
     proposed_risk_pct = (
         proposed_risk_amount
@@ -1330,43 +2551,72 @@ def authorize_trade(
     )
 
     # --------------------------------------------------------
-    # PER-ASSET TRADE RISK CAP
+    # ASSET RISK LIMIT
     # --------------------------------------------------------
 
     asset_risk_limit = (
-        MAX_METALS_RISK_PCT
-        if asset_class == "METAL"
-        else MAX_CRYPTO_RISK_PCT
+        ASSET_RISK_LIMITS.get(
+            asset_class
+        )
     )
+
+    if asset_risk_limit is None:
+
+        return _decision(
+            approved=False,
+            status=
+                "NO_ASSET_RISK_LIMIT",
+            reason=(
+                "No configured risk limit "
+                f"for {asset_class}"
+            ),
+            asset_class=
+                asset_class,
+            symbol=
+                symbol,
+            side=
+                normalized_side,
+        )
 
     if (
         proposed_risk_pct
         > asset_risk_limit
     ):
 
-        return {
-            "approved":
-                False,
-
-            "status":
+        return _decision(
+            approved=False,
+            status=
                 "TRADE_RISK_TOO_HIGH",
-
-            "reason":
-                (
-                    f"{asset_class} proposed risk "
-                    f"{proposed_risk_pct:.2f}% "
-                    f"exceeds {asset_risk_limit:.2f}%"
-                ),
-
-            "proposed_risk_pct":
+            reason=(
+                f"{asset_class} proposed risk "
+                f"{proposed_risk_pct:.2f}% "
+                f"exceeds "
+                f"{asset_risk_limit:.2f}%"
+            ),
+            asset_class=
+                asset_class,
+            symbol=
+                symbol,
+            side=
+                normalized_side,
+            entry_price=
+                entry_price,
+            stop_loss=
+                stop_loss,
+            quantity=
+                quantity,
+            proposed_risk_amount=
+                proposed_risk_amount,
+            proposed_risk_pct=
                 proposed_risk_pct,
-
-            "asset_risk_limit":
+            asset_risk_limit=
                 asset_risk_limit,
-        }
+            balance=
+                balance,
+        )
 
     # --------------------------------------------------------
-    # OPTIONAL CALLER RISK CONSISTENCY
+    # CALLER RISK CONSISTENCY
     # --------------------------------------------------------
 
     if risk_pct is not None:
@@ -1377,27 +2627,54 @@ def authorize_trade(
             )
         )
 
+        if requested_risk_pct < 0:
+
+            return _decision(
+                approved=False,
+                status=
+                    "INVALID_REQUESTED_RISK",
+                reason=(
+                    "Requested risk percentage is invalid"
+                ),
+                asset_class=
+                    asset_class,
+                symbol=
+                    symbol,
+                side=
+                    normalized_side,
+            )
+
         if (
             requested_risk_pct
             > asset_risk_limit
         ):
 
-            return {
-                "approved":
-                    False,
-
-                "status":
+            return _decision(
+                approved=False,
+                status=
                     "REQUESTED_RISK_TOO_HIGH",
-
-                "reason":
-                    (
-                        "Requested risk percentage "
-                        "exceeds asset risk limit"
-                    ),
-            }
+                reason=(
+                    "Requested risk percentage "
+                    "exceeds asset risk limit"
+                ),
+                asset_class=
+                    asset_class,
+                symbol=
+                    symbol,
+                side=
+                    normalized_side,
+                proposed_risk_pct=
+                    proposed_risk_pct,
+                requested_risk_pct=
+                    requested_risk_pct,
+                asset_risk_limit=
+                    asset_risk_limit,
+                balance=
+                    balance,
+            )
 
     # --------------------------------------------------------
-    # PORTFOLIO OPEN-RISK CAP
+    # PORTFOLIO OPEN RISK
     # --------------------------------------------------------
 
     portfolio_risk = (
@@ -1424,94 +2701,134 @@ def authorize_trade(
         > MAX_PORTFOLIO_RISK_PCT
     ):
 
-        return {
-            "approved":
-                False,
-
-            "status":
+        return _decision(
+            approved=False,
+            status=
                 "PORTFOLIO_RISK_LIMIT",
-
-            "reason":
-                (
-                    "Projected portfolio risk "
-                    "exceeds maximum"
-                ),
-
-            "current_risk_pct":
+            reason=(
+                "Projected portfolio risk "
+                "exceeds maximum"
+            ),
+            asset_class=
+                asset_class,
+            symbol=
+                symbol,
+            side=
+                normalized_side,
+            entry_price=
+                entry_price,
+            stop_loss=
+                stop_loss,
+            quantity=
+                quantity,
+            proposed_risk_amount=
+                proposed_risk_amount,
+            proposed_risk_pct=
+                proposed_risk_pct,
+            current_portfolio_risk_pct=
                 portfolio_risk[
                     "risk_pct"
                 ],
-
-            "projected_risk_pct":
+            projected_portfolio_risk_pct=
                 projected_risk_pct,
-
-            "limit_pct":
+            limit_pct=
                 MAX_PORTFOLIO_RISK_PCT,
-        }
+            balance=
+                balance,
+        )
 
     # --------------------------------------------------------
     # FINAL APPROVAL
     # --------------------------------------------------------
 
-    return {
-        "approved":
-            True,
+    return _decision(
+        approved=True,
+        status="APPROVED",
+        reason=(
+            "Portfolio Risk Governor "
+            "approved trade"
+        ),
 
-        "status":
-            "APPROVED",
-
-        "reason":
-            "Portfolio Risk Governor approved trade",
-
-        "asset_class":
+        asset_class=
             asset_class,
 
-        "slot":
+        slot=
             slot,
 
-        "symbol":
+        symbol=
             symbol,
 
-        "balance":
+        side=
+            normalized_side,
+
+        entry_price=
+            entry_price,
+
+        stop_loss=
+            stop_loss,
+
+        quantity=
+            quantity,
+
+        contract_multiplier=
+            contract_multiplier,
+
+        point_value=
+            point_value,
+
+        fx_rate=
+            fx_rate,
+
+        balance=
             balance,
 
-        "proposed_risk_amount":
+        proposed_risk_amount=
             proposed_risk_amount,
 
-        "proposed_risk_pct":
+        proposed_risk_pct=
             proposed_risk_pct,
 
-        "current_portfolio_risk_pct":
+        current_portfolio_risk_pct=
             portfolio_risk[
                 "risk_pct"
             ],
 
-        "projected_portfolio_risk_pct":
+        projected_portfolio_risk_pct=
             projected_risk_pct,
 
-        "daily_loss_pct":
+        daily_loss_pct=
             daily[
                 "loss_pct"
             ],
 
-        "drawdown_pct":
+        drawdown_pct=
             drawdown[
                 "drawdown_pct"
             ],
 
-        "consecutive_losses":
+        high_water_equity=
+            drawdown[
+                "high_water_equity"
+            ],
+
+        day_start_equity=
+            daily[
+                "day_start_equity"
+            ],
+
+        consecutive_losses=
             consecutive_losses,
 
-        "paper_only":
-            True,
+        cooldown=
+            cooldown,
 
-        "real_execution":
-            False,
-    }
+        risk_model=
+            "V5_CONTRACT_AWARE",
+    )
 
 
 # ============================================================
-# PORTFOLIO GOVERNOR SNAPSHOT
+# PORTFOLIO RISK SNAPSHOT
 # ============================================================
 
 def get_portfolio_risk_snapshot(
@@ -1615,7 +2932,7 @@ def get_portfolio_risk_snapshot(
 
     return {
         "engine":
-            "V4.0 Portfolio Risk Governor",
+            ENGINE_VERSION,
 
         "paper_only":
             True,
@@ -1641,6 +2958,16 @@ def get_portfolio_risk_snapshot(
                 "starting_balance"
             ],
 
+        "day_start_equity":
+            baseline[
+                "day_start_equity"
+            ],
+
+        "high_water_equity":
+            baseline[
+                "high_water_equity"
+            ],
+
         "daily":
             daily,
 
@@ -1658,6 +2985,36 @@ def get_portfolio_risk_snapshot(
 
         "portfolio":
             portfolio,
+
+        "risk_model":
+            {
+                "version":
+                    "V5",
+
+                "peak_equity_drawdown":
+                    True,
+
+                "persistent_day_start":
+                    bool(
+                        DATABASE_URL
+                    ),
+
+                "persistent_high_water":
+                    bool(
+                        DATABASE_URL
+                    ),
+
+                "contract_aware":
+                    True,
+
+                "side_aware":
+                    True,
+
+                "decision_audit":
+                    bool(
+                        DATABASE_URL
+                    ),
+            },
 
         "limits":
             {
@@ -1690,6 +3047,18 @@ def get_portfolio_risk_snapshot(
 
                 "max_metals_risk_pct":
                     MAX_METALS_RISK_PCT,
+
+                "max_stock_risk_pct":
+                    MAX_STOCK_RISK_PCT,
+
+                "max_fx_risk_pct":
+                    MAX_FX_RISK_PCT,
+
+                "max_index_risk_pct":
+                    MAX_INDEX_RISK_PCT,
+
+                "max_futures_risk_pct":
+                    MAX_FUTURES_RISK_PCT,
             },
     }
 
@@ -1707,7 +3076,7 @@ def portfolio_risk_governor_health(
             True,
 
         "engine":
-            "V4.0 Portfolio Risk Governor",
+            ENGINE_VERSION,
 
         "paper_only":
             True,
@@ -1715,15 +3084,80 @@ def portfolio_risk_governor_health(
         "real_execution_locked":
             True,
 
-        "supported_asset_classes":
+        "database_state_persistence":
+            bool(
+                DATABASE_URL
+            ),
+
+        "decision_audit":
+            bool(
+                DATABASE_URL
+            ),
+
+        "high_water_drawdown":
+            True,
+
+        "daily_equity_baseline":
+            True,
+
+        "finite_number_validation":
+            True,
+
+        "side_aware_stop_validation":
+            True,
+
+        "contract_aware_risk":
+            True,
+
+        "supported_active_asset_classes":
             [
                 "CRYPTO",
                 "METAL",
             ],
 
+        "future_risk_models_ready":
+            [
+                "STOCK",
+                "FX",
+                "INDEX",
+                "FUTURES",
+            ],
+
         "future_asset_ready":
             True,
     }
+
+    if DATABASE_URL:
+
+        try:
+
+            ensure_risk_governor_tables()
+
+            result[
+                "database"
+            ] = "ONLINE"
+
+        except Exception as error:
+
+            result[
+                "ok"
+            ] = False
+
+            result[
+                "database"
+            ] = "ERROR"
+
+            result[
+                "reason"
+            ] = str(
+                error
+            )
+
+    else:
+
+        result[
+            "database"
+        ] = "NOT_CONFIGURED"
 
     if trader is not None:
 
