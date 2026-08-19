@@ -1,51 +1,80 @@
 """
 trade_engine.py
 
-PRO AI QUANT TERMINAL V4.1
-CRYPTO PAPER EXECUTION ENGINE
-WITH UNIFIED PORTFOLIO RISK GOVERNOR
+PRO AI QUANT TERMINAL V5
+CRYPTO INTRADAY PAPER EXECUTION ENGINE
+
+Purpose
+-------
+Single orchestration layer for approved CRYPTO paper entries.
+
+Authoritative execution chain
+-----------------------------
+Scanner
+    ↓
+V5 Strategy Engine
+    ↓
+V5 Risk Manager
+    ↓
+V5 Portfolio Risk Governor
+    ↓
+PaperTrader
+    ↓
+V5 Trade Lifecycle Engine
 
 Responsibilities
 ----------------
-- Open approved Crypto paper trades
-- Use CRYPTO_MAIN only
-- Preserve independent METALS_MAIN position
-- Central Portfolio Risk Governor approval
-- Automatic TP / SL monitoring
-- Manual paper close
-- Existing Test Mode compatibility
-- Existing risk_manager compatibility
-- Future-ready for trailing stop / break-even
-
-Execution chain
----------------
-Crypto Scanner / Strategy
-        ↓
-trade_engine.py
-        ↓
-risk_manager.py
-        ↓
-Portfolio Risk Governor V4
-        ↓
-PaperTrader CRYPTO_MAIN
+- CRYPTO_MAIN entry orchestration
+- Reconfirm V5 strategy before execution
+- Use strategy-generated SL / TP
+- Shift strategy risk geometry to live entry price
+- Reject stale / drifted entries
+- Enforce confidence and quality gates
+- Enforce execution-cost gate
+- Risk-based position sizing
+- Portfolio Governor final approval
+- Preserve independent METALS_MAIN slot
+- Current-price access
+- Read-only position monitoring
+- Manual PAPER close
+- PAPER ONLY
+- REAL ORDERS HARD DISABLED
 
 IMPORTANT
 ---------
-PAPER TRADING ONLY
-REAL ORDERS HARD DISABLED
+This module does NOT manage an open trade's trailing stop,
+break-even, stale exit or maximum holding time.
+
+Those responsibilities belong exclusively to:
+
+    trade_lifecycle_engine.py
+
+This prevents duplicate trade-management authorities.
 """
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+import inspect
+import math
+import os
+from typing import Any, Dict, Optional
 
 from market_data import (
     get_candles,
     get_ticker,
 )
 
+from paper_trader import (
+    CRYPTO_SLOT,
+)
+
+from portfolio_risk_governor import (
+    authorize_trade,
+)
+
 from risk_manager import (
     calculate_trade_plan,
+    calculate_trade_plan_from_prices,
     validate_trade_plan,
 )
 
@@ -58,19 +87,18 @@ from settings import (
     TEST_SL_PCT,
     TIMEFRAME_MINUTES,
     CANDLE_LIMIT,
-    TRAILING_STOP_ENABLED,
-    TRAILING_STOP_PCT,
-    BREAK_EVEN_ENABLED,
-    BREAK_EVEN_TRIGGER_PCT,
 )
 
-from paper_trader import (
-    CRYPTO_SLOT,
+from strategy_engine import (
+    confirm_scanner_setup,
 )
 
-from portfolio_risk_governor import (
-    authorize_trade,
-)
+
+# ============================================================
+# VERSION
+# ============================================================
+
+ENGINE_VERSION = "V5 Crypto Intraday Paper Execution"
 
 
 # ============================================================
@@ -80,6 +108,147 @@ from portfolio_risk_governor import (
 PAPER_ONLY = True
 REAL_CRYPTO_ORDERS_ENABLED = False
 
+if REAL_CRYPTO_ORDERS_ENABLED:
+
+    raise RuntimeError(
+        "REAL_CRYPTO_ORDERS_ENABLED must remain False."
+    )
+
+
+# ============================================================
+# ENV HELPERS
+# ============================================================
+
+def _env_float(
+    name: str,
+    default: float,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+) -> float:
+
+    raw = os.environ.get(
+        name,
+        str(default),
+    )
+
+    try:
+
+        value = float(
+            raw
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
+        value = float(
+            default
+        )
+
+    if not math.isfinite(
+        value
+    ):
+
+        value = float(
+            default
+        )
+
+    if minimum is not None:
+
+        value = max(
+            minimum,
+            value,
+        )
+
+    if maximum is not None:
+
+        value = min(
+            maximum,
+            value,
+        )
+
+    return value
+
+
+def _env_bool(
+    name: str,
+    default: bool,
+) -> bool:
+
+    raw = os.environ.get(
+        name,
+        "true"
+        if default
+        else "false",
+    )
+
+    return (
+        raw.strip()
+        .lower()
+        in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    )
+
+
+# ============================================================
+# V5 EXECUTION POLICY
+# ============================================================
+
+MIN_EXECUTION_CONFIDENCE = _env_float(
+    "CRYPTO_EXECUTION_MIN_CONFIDENCE",
+    68.0,
+    minimum=50.0,
+    maximum=98.0,
+)
+
+
+# Maximum acceptable movement between the strategy's analysed
+# price and the actual execution price.
+MAX_ENTRY_DRIFT_PCT = _env_float(
+    "CRYPTO_MAX_ENTRY_DRIFT_PCT",
+    0.35,
+    minimum=0.05,
+    maximum=3.0,
+)
+
+
+# Entry may also move only this fraction of the initial
+# strategy stop distance before we reject it as stale.
+MAX_ENTRY_DRIFT_STOP_FRACTION = _env_float(
+    "CRYPTO_MAX_ENTRY_DRIFT_STOP_FRACTION",
+    0.35,
+    minimum=0.05,
+    maximum=1.0,
+)
+
+
+# Strategy risk geometry is shifted to current live price
+# rather than blindly executing old absolute prices.
+SHIFT_STRATEGY_LEVELS_TO_LIVE_ENTRY = _env_bool(
+    "CRYPTO_SHIFT_LEVELS_TO_LIVE_ENTRY",
+    True,
+)
+
+
+# Fail closed by default.
+# Legacy fixed-percent TP/SL only exists for compatibility.
+ALLOW_LEGACY_PERCENT_FALLBACK = _env_bool(
+    "CRYPTO_ALLOW_LEGACY_PERCENT_FALLBACK",
+    False,
+)
+
+
+# B-grade or better from V5 Strategy Engine.
+ALLOWED_STRATEGY_QUALITIES = {
+    "A",
+    "B",
+}
+
 
 # ============================================================
 # HELPERS
@@ -88,18 +257,22 @@ REAL_CRYPTO_ORDERS_ENABLED = False
 def _safe_float(
     value,
     default=0.0,
-):
+) -> float:
 
     try:
 
         if value is None:
+
             return default
 
         number = float(
             value
         )
 
-        if number != number:
+        if not math.isfinite(
+            number
+        ):
+
             return default
 
         return number
@@ -107,6 +280,7 @@ def _safe_float(
     except (
         TypeError,
         ValueError,
+        OverflowError,
     ):
 
         return default
@@ -114,15 +288,96 @@ def _safe_float(
 
 def _normalize_symbol(
     symbol,
-):
+) -> str:
 
     return (
-        str(symbol)
+        str(
+            symbol
+            or ""
+        )
         .upper()
         .replace("/", "")
         .replace("-", "")
         .replace(" ", "")
         .strip()
+    )
+
+
+def _normalize_signal(
+    signal,
+) -> str:
+
+    value = (
+        str(
+            signal
+            or ""
+        )
+        .upper()
+        .strip()
+    )
+
+    aliases = {
+        "LONG":
+            "BUY",
+
+        "SHORT":
+            "SELL",
+    }
+
+    value = aliases.get(
+        value,
+        value,
+    )
+
+    if value not in (
+        "BUY",
+        "SELL",
+    ):
+
+        return "NO TRADE"
+
+    return value
+
+
+def _signal_to_side(
+    signal: str,
+) -> str:
+
+    if signal == "BUY":
+
+        return "LONG"
+
+    if signal == "SELL":
+
+        return "SHORT"
+
+    return ""
+
+
+def _pct_difference(
+    first: float,
+    second: float,
+) -> float:
+
+    first = _safe_float(
+        first
+    )
+
+    second = _safe_float(
+        second
+    )
+
+    if first <= 0:
+
+        return 0.0
+
+    return (
+        abs(
+            second
+            - first
+        )
+        / first
+        * 100.0
     )
 
 
@@ -161,8 +416,7 @@ def get_current_price(
         return None
 
     # --------------------------------------------------------
-    # PRIMARY:
-    # PUBLIC LIVE TICKER
+    # PRIMARY LIVE PUBLIC TICKER
     # --------------------------------------------------------
 
     try:
@@ -180,8 +434,7 @@ def get_current_price(
             price = _safe_float(
                 ticker.get(
                     "last"
-                ),
-                0.0,
+                )
             )
 
             if price > 0:
@@ -191,14 +444,13 @@ def get_current_price(
     except Exception as error:
 
         print(
-            "[CRYPTO PRICE TICKER ERROR] "
+            "[V5 CRYPTO PRICE TICKER ERROR] "
             f"{symbol}: {error}",
             flush=True,
         )
 
     # --------------------------------------------------------
-    # FALLBACK:
-    # LATEST PUBLIC CANDLE CLOSE
+    # FALLBACK PUBLIC CANDLE
     # --------------------------------------------------------
 
     try:
@@ -215,7 +467,9 @@ def get_current_price(
 
         if (
             candles is None
-            or len(candles) == 0
+            or len(
+                candles
+            ) == 0
         ):
 
             return None
@@ -223,8 +477,9 @@ def get_current_price(
         price = _safe_float(
             candles[
                 "close"
-            ].iloc[-1],
-            0.0,
+            ].iloc[
+                -1
+            ]
         )
 
         if price <= 0:
@@ -236,7 +491,7 @@ def get_current_price(
     except Exception as error:
 
         print(
-            "[CRYPTO PRICE CANDLE ERROR] "
+            "[V5 CRYPTO PRICE CANDLE ERROR] "
             f"{symbol}: {error}",
             flush=True,
         )
@@ -252,11 +507,13 @@ def get_position_status(
     trader,
 ) -> Dict:
 
-    position = trader.get_position(
-        CRYPTO_SLOT
-    )
+    try:
 
-    if not position:
+        position = trader.get_position(
+            CRYPTO_SLOT
+        )
+
+    except Exception as error:
 
         return {
             "has_position":
@@ -268,6 +525,14 @@ def get_position_status(
             "position":
                 None,
 
+            "status":
+                "ERROR",
+
+            "reason":
+                str(
+                    error
+                ),
+
             "paper_only":
                 True,
 
@@ -277,7 +542,8 @@ def get_position_status(
 
     return {
         "has_position":
-            True,
+            position
+            is not None,
 
         "slot":
             CRYPTO_SLOT,
@@ -294,36 +560,37 @@ def get_position_status(
 
 
 # ============================================================
-# SETUP VALIDATION
+# BASIC SCANNER SETUP VALIDATION
 # ============================================================
 
-def _validate_crypto_setup(
+def _validate_scanner_setup(
     setup: Dict,
 ) -> Dict:
 
-    if not setup:
+    if not isinstance(
+        setup,
+        dict,
+    ):
 
         return {
             "valid":
                 False,
 
             "reason":
-                "Missing setup",
+                "Missing scanner setup",
         }
 
     symbol = _normalize_symbol(
         setup.get(
-            "symbol",
-            "",
+            "symbol"
         )
     )
 
-    signal = str(
+    signal = _normalize_signal(
         setup.get(
-            "signal",
-            "NO TRADE",
+            "signal"
         )
-    ).upper().strip()
+    )
 
     if not symbol:
 
@@ -345,16 +612,16 @@ def _validate_crypto_setup(
                 False,
 
             "reason":
-                "Invalid Crypto signal",
+                "Scanner has no directional signal",
         }
 
-    # Scanner / strategy layers may provide approved=False.
-    # Respect it when explicitly present.
     if (
-        "approved" in setup
+        "approved"
+        in setup
         and setup.get(
             "approved"
-        ) is False
+        )
+        is False
     ):
 
         return {
@@ -362,7 +629,7 @@ def _validate_crypto_setup(
                 False,
 
             "reason":
-                "Crypto setup not approved",
+                "Scanner explicitly rejected setup",
         }
 
     return {
@@ -378,40 +645,645 @@ def _validate_crypto_setup(
 
 
 # ============================================================
-# ENTRY PRICE
+# V5 STRATEGY RECONFIRMATION
 # ============================================================
 
-def _resolve_entry_price(
+def _resolve_strategy_confirmation(
     setup: Dict,
-    symbol: str,
-) -> Optional[float]:
+) -> Dict:
 
-    # Existing scanner uses "price".
-    # Future strategy layers may use "entry_price".
+    """
+    Prefer an already-attached V5 strategy confirmation.
 
-    candidates = (
+    If app/scanner does not attach it, recompute exactly once
+    here before paper execution.
+
+    This keeps trade_engine authoritative at execution time.
+    """
+
+    attached_candidates = (
         setup.get(
-            "entry_price"
+            "confirmation"
         ),
         setup.get(
-            "price"
+            "strategy_confirmation"
         ),
     )
 
-    for candidate in candidates:
+    for attached in attached_candidates:
 
-        value = _safe_float(
-            candidate,
-            0.0,
+        if (
+            isinstance(
+                attached,
+                dict,
+            )
+            and
+            "approved"
+            in attached
+        ):
+
+            return attached
+
+    # --------------------------------------------------------
+    # Reconfirm immediately before execution.
+    # --------------------------------------------------------
+
+    try:
+
+        return confirm_scanner_setup(
+            setup
         )
 
-        if value > 0:
+    except Exception as error:
 
-            return value
+        return {
+            "approved":
+                False,
 
-    return get_current_price(
-        symbol
+            "reason":
+                (
+                    "V5 strategy confirmation failed: "
+                    f"{error}"
+                ),
+        }
+
+
+# ============================================================
+# STRATEGY QUALITY GATE
+# ============================================================
+
+def _validate_strategy_confirmation(
+    confirmation: Dict,
+    scanner_signal: str,
+) -> Dict:
+
+    if not isinstance(
+        confirmation,
+        dict,
+    ):
+
+        return {
+            "valid":
+                False,
+
+            "reason":
+                "Missing V5 strategy confirmation",
+        }
+
+    if not confirmation.get(
+        "approved",
+        False,
+    ):
+
+        return {
+            "valid":
+                False,
+
+            "reason":
+                confirmation.get(
+                    "reason",
+                    "V5 strategy rejected setup",
+                ),
+        }
+
+    strategy_signal = (
+        _normalize_signal(
+            confirmation.get(
+                "strategy_signal",
+                confirmation.get(
+                    "signal"
+                ),
+            )
+        )
     )
+
+    if (
+        strategy_signal
+        != scanner_signal
+    ):
+
+        return {
+            "valid":
+                False,
+
+            "reason":
+                (
+                    "Scanner and V5 Strategy "
+                    "directions disagree"
+                ),
+        }
+
+    confidence = _safe_float(
+        confirmation.get(
+            "confidence"
+        )
+    )
+
+    if (
+        confidence
+        < MIN_EXECUTION_CONFIDENCE
+    ):
+
+        return {
+            "valid":
+                False,
+
+            "reason":
+                (
+                    "V5 Strategy confidence below "
+                    f"{MIN_EXECUTION_CONFIDENCE:.1f}%"
+                ),
+
+            "confidence":
+                confidence,
+        }
+
+    quality = (
+        str(
+            confirmation.get(
+                "quality",
+                ""
+            )
+        )
+        .upper()
+        .strip()
+    )
+
+    if (
+        quality
+        and quality
+        not in ALLOWED_STRATEGY_QUALITIES
+    ):
+
+        return {
+            "valid":
+                False,
+
+            "reason":
+                (
+                    f"Strategy quality {quality} "
+                    "is not executable"
+                ),
+
+            "quality":
+                quality,
+        }
+
+    cost_filter = confirmation.get(
+        "cost_filter_passed"
+    )
+
+    if cost_filter is False:
+
+        return {
+            "valid":
+                False,
+
+            "reason":
+                "Execution-cost filter rejected trade",
+        }
+
+    return {
+        "valid":
+            True,
+
+        "strategy_signal":
+            strategy_signal,
+
+        "confidence":
+            confidence,
+
+        "quality":
+            quality
+            or "B",
+    }
+
+
+# ============================================================
+# EXTRACT STRATEGY PLAN
+# ============================================================
+
+def _extract_strategy_prices(
+    confirmation: Dict,
+) -> Dict:
+
+    strategy = confirmation.get(
+        "strategy"
+    )
+
+    if not isinstance(
+        strategy,
+        dict,
+    ):
+
+        strategy = {}
+
+    entry_price = _safe_float(
+        confirmation.get(
+            "entry_price",
+            strategy.get(
+                "entry_price"
+            ),
+        )
+    )
+
+    stop_loss = _safe_float(
+        confirmation.get(
+            "suggested_stop_loss",
+            strategy.get(
+                "suggested_stop_loss"
+            ),
+        )
+    )
+
+    take_profit = _safe_float(
+        confirmation.get(
+            "suggested_take_profit",
+            strategy.get(
+                "suggested_take_profit"
+            ),
+        )
+    )
+
+    reward_risk = _safe_float(
+        confirmation.get(
+            "suggested_reward_risk",
+            strategy.get(
+                "suggested_reward_risk"
+            ),
+        )
+    )
+
+    target_hold_hours = _safe_float(
+        confirmation.get(
+            "target_hold_hours",
+            strategy.get(
+                "target_hold_hours",
+                3.0,
+            ),
+        ),
+        3.0,
+    )
+
+    return {
+        "entry_price":
+            entry_price,
+
+        "stop_loss":
+            stop_loss,
+
+        "take_profit":
+            take_profit,
+
+        "reward_risk":
+            reward_risk,
+
+        "target_hold_hours":
+            target_hold_hours,
+    }
+
+
+# ============================================================
+# LIVE ENTRY / STALE SIGNAL CONTROL
+# ============================================================
+
+def _build_live_execution_levels(
+    *,
+    signal: str,
+    strategy_entry: float,
+    strategy_stop: float,
+    strategy_target: float,
+    live_entry: float,
+) -> Dict:
+
+    if (
+        strategy_entry <= 0
+        or strategy_stop <= 0
+        or strategy_target <= 0
+        or live_entry <= 0
+    ):
+
+        return {
+            "valid":
+                False,
+
+            "reason":
+                "Invalid strategy/live execution prices",
+        }
+
+    # --------------------------------------------------------
+    # VALID ORIGINAL STRATEGY GEOMETRY
+    # --------------------------------------------------------
+
+    if signal == "BUY":
+
+        original_structure_valid = (
+            strategy_stop
+            < strategy_entry
+            < strategy_target
+        )
+
+    else:
+
+        original_structure_valid = (
+            strategy_target
+            < strategy_entry
+            < strategy_stop
+        )
+
+    if not original_structure_valid:
+
+        return {
+            "valid":
+                False,
+
+            "reason":
+                "V5 strategy produced invalid SL/TP geometry",
+        }
+
+    stop_distance = abs(
+        strategy_entry
+        - strategy_stop
+    )
+
+    target_distance = abs(
+        strategy_target
+        - strategy_entry
+    )
+
+    if (
+        stop_distance <= 0
+        or target_distance <= 0
+    ):
+
+        return {
+            "valid":
+                False,
+
+            "reason":
+                "Invalid strategy risk distance",
+        }
+
+    # --------------------------------------------------------
+    # STALE / ENTRY DRIFT FILTER
+    # --------------------------------------------------------
+
+    drift_amount = abs(
+        live_entry
+        - strategy_entry
+    )
+
+    drift_pct = _pct_difference(
+        strategy_entry,
+        live_entry,
+    )
+
+    stop_fraction = (
+        drift_amount
+        / stop_distance
+    )
+
+    if (
+        drift_pct
+        > MAX_ENTRY_DRIFT_PCT
+    ):
+
+        return {
+            "valid":
+                False,
+
+            "reason":
+                (
+                    "Entry moved too far after signal "
+                    f"({drift_pct:.3f}% drift)"
+                ),
+
+            "drift_pct":
+                drift_pct,
+
+            "stop_fraction":
+                stop_fraction,
+        }
+
+    if (
+        stop_fraction
+        > MAX_ENTRY_DRIFT_STOP_FRACTION
+    ):
+
+        return {
+            "valid":
+                False,
+
+            "reason":
+                (
+                    "Entry drift consumed too much "
+                    "of initial stop distance"
+                ),
+
+            "drift_pct":
+                drift_pct,
+
+            "stop_fraction":
+                stop_fraction,
+        }
+
+    # --------------------------------------------------------
+    # SHIFT RISK GEOMETRY TO ACTUAL ENTRY
+    # --------------------------------------------------------
+
+    if SHIFT_STRATEGY_LEVELS_TO_LIVE_ENTRY:
+
+        if signal == "BUY":
+
+            execution_stop = (
+                live_entry
+                - stop_distance
+            )
+
+            execution_target = (
+                live_entry
+                + target_distance
+            )
+
+        else:
+
+            execution_stop = (
+                live_entry
+                + stop_distance
+            )
+
+            execution_target = (
+                live_entry
+                - target_distance
+            )
+
+    else:
+
+        execution_stop = (
+            strategy_stop
+        )
+
+        execution_target = (
+            strategy_target
+        )
+
+    # --------------------------------------------------------
+    # FINAL STRUCTURE
+    # --------------------------------------------------------
+
+    if signal == "BUY":
+
+        final_structure_valid = (
+            execution_stop
+            < live_entry
+            < execution_target
+        )
+
+    else:
+
+        final_structure_valid = (
+            execution_target
+            < live_entry
+            < execution_stop
+        )
+
+    if not final_structure_valid:
+
+        return {
+            "valid":
+                False,
+
+            "reason":
+                "Live execution geometry is invalid",
+        }
+
+    reward_risk = (
+        abs(
+            execution_target
+            - live_entry
+        )
+        /
+        abs(
+            live_entry
+            - execution_stop
+        )
+    )
+
+    return {
+        "valid":
+            True,
+
+        "entry_price":
+            live_entry,
+
+        "stop_loss":
+            execution_stop,
+
+        "take_profit":
+            execution_target,
+
+        "reward_risk":
+            reward_risk,
+
+        "strategy_entry":
+            strategy_entry,
+
+        "entry_drift_pct":
+            drift_pct,
+
+        "entry_drift_stop_fraction":
+            stop_fraction,
+
+        "levels_shifted":
+            SHIFT_STRATEGY_LEVELS_TO_LIVE_ENTRY,
+    }
+
+
+# ============================================================
+# LEGACY FALLBACK
+# ============================================================
+
+def _build_legacy_plan(
+    *,
+    balance: float,
+    entry_price: float,
+    signal: str,
+) -> Dict:
+
+    if not ALLOW_LEGACY_PERCENT_FALLBACK:
+
+        return {
+            "valid":
+                False,
+
+            "reason":
+                (
+                    "V5 strategy prices unavailable and "
+                    "legacy fallback is disabled"
+                ),
+        }
+
+    return calculate_trade_plan(
+        balance=balance,
+        entry_price=entry_price,
+        signal=signal,
+        risk_percent=RISK_PCT,
+        stop_loss_percent=_safe_float(
+            _active_sl_pct()
+        ),
+        take_profit_percent=_safe_float(
+            _active_tp_pct()
+        ),
+    )
+
+
+# ============================================================
+# PAPERTRADER OPEN CAPABILITY
+# ============================================================
+
+def _paper_trader_open_capability(
+    trader,
+) -> Dict:
+
+    method = getattr(
+        trader,
+        "open_trade",
+        None,
+    )
+
+    if not callable(
+        method
+    ):
+
+        return {
+            "ok":
+                False,
+
+            "reason":
+                "PaperTrader.open_trade unavailable",
+        }
+
+    try:
+
+        signature = inspect.signature(
+            method
+        )
+
+        parameters = list(
+            signature.parameters.keys()
+        )
+
+    except Exception:
+
+        parameters = []
+
+    return {
+        "ok":
+            True,
+
+        "parameters":
+            parameters,
+    }
 
 
 # ============================================================
@@ -423,9 +1295,9 @@ def open_approved_trade(
     setup: Dict,
 ) -> Dict:
 
-    # --------------------------------------------------------
-    # HARD REAL EXECUTION LOCK
-    # --------------------------------------------------------
+    # ========================================================
+    # HARD REAL-ORDER LOCK
+    # ========================================================
 
     if (
         not PAPER_ONLY
@@ -446,15 +1318,15 @@ def open_approved_trade(
                 False,
         }
 
-    # --------------------------------------------------------
-    # VALIDATE SETUP
-    # --------------------------------------------------------
+    # ========================================================
+    # 1. BASIC SCANNER VALIDATION
+    # ========================================================
 
-    validation = _validate_crypto_setup(
+    scanner = _validate_scanner_setup(
         setup
     )
 
-    if not validation.get(
+    if not scanner.get(
         "valid",
         False,
     ):
@@ -464,9 +1336,9 @@ def open_approved_trade(
                 "SKIPPED",
 
             "reason":
-                validation.get(
+                scanner.get(
                     "reason",
-                    "Invalid Crypto setup",
+                    "Invalid scanner setup",
                 ),
 
             "paper_only":
@@ -476,21 +1348,42 @@ def open_approved_trade(
                 False,
         }
 
-    symbol = validation[
+    symbol = scanner[
         "symbol"
     ]
 
-    signal = validation[
+    signal = scanner[
         "signal"
     ]
 
-    # --------------------------------------------------------
-    # CRYPTO SLOT PROTECTION
-    # --------------------------------------------------------
+    # ========================================================
+    # 2. CRYPTO SLOT PROTECTION
+    # ========================================================
 
-    existing = trader.get_position(
-        CRYPTO_SLOT
-    )
+    try:
+
+        existing = trader.get_position(
+            CRYPTO_SLOT
+        )
+
+    except Exception as error:
+
+        return {
+            "status":
+                "ERROR",
+
+            "reason":
+                (
+                    "Could not inspect CRYPTO_MAIN: "
+                    f"{error}"
+                ),
+
+            "paper_only":
+                True,
+
+            "real_orders":
+                False,
+        }
 
     if existing:
 
@@ -511,9 +1404,17 @@ def open_approved_trade(
                 False,
         }
 
-    if not trader.slot_available(
-        CRYPTO_SLOT
-    ):
+    try:
+
+        slot_available = trader.slot_available(
+            CRYPTO_SLOT
+        )
+
+    except Exception:
+
+        slot_available = False
+
+    if not slot_available:
 
         return {
             "status":
@@ -529,31 +1430,40 @@ def open_approved_trade(
                 False,
         }
 
-    # --------------------------------------------------------
-    # ENTRY PRICE
-    # --------------------------------------------------------
+    # ========================================================
+    # 3. V5 STRATEGY RECONFIRMATION
+    # ========================================================
 
-    entry_price = _resolve_entry_price(
-        setup,
-        symbol,
+    confirmation = (
+        _resolve_strategy_confirmation(
+            setup
+        )
     )
 
-    entry_price = _safe_float(
-        entry_price,
-        0.0,
+    quality_gate = (
+        _validate_strategy_confirmation(
+            confirmation,
+            signal,
+        )
     )
 
-    if entry_price <= 0:
+    if not quality_gate.get(
+        "valid",
+        False,
+    ):
 
         return {
             "status":
-                "SKIPPED",
+                "STRATEGY_REJECTED",
 
             "reason":
-                (
-                    "Could not determine "
-                    "Crypto entry price"
+                quality_gate.get(
+                    "reason",
+                    "V5 Strategy rejected setup",
                 ),
+
+            "confirmation":
+                confirmation,
 
             "paper_only":
                 True,
@@ -562,14 +1472,91 @@ def open_approved_trade(
                 False,
         }
 
-    # --------------------------------------------------------
-    # BALANCE
-    # --------------------------------------------------------
-
-    balance = _safe_float(
-        trader.get_balance(),
-        0.0,
+    confidence = _safe_float(
+        quality_gate.get(
+            "confidence"
+        )
     )
+
+    strategy_quality = (
+        quality_gate.get(
+            "quality",
+            "B",
+        )
+    )
+
+    # ========================================================
+    # 4. STRATEGY PRICE PLAN
+    # ========================================================
+
+    strategy_prices = (
+        _extract_strategy_prices(
+            confirmation
+        )
+    )
+
+    strategy_entry = _safe_float(
+        strategy_prices[
+            "entry_price"
+        ]
+    )
+
+    strategy_stop = _safe_float(
+        strategy_prices[
+            "stop_loss"
+        ]
+    )
+
+    strategy_target = _safe_float(
+        strategy_prices[
+            "take_profit"
+        ]
+    )
+
+    # ========================================================
+    # 5. LIVE ENTRY PRICE
+    # ========================================================
+
+    live_entry = get_current_price(
+        symbol
+    )
+
+    live_entry = _safe_float(
+        live_entry
+    )
+
+    if live_entry <= 0:
+
+        return {
+            "status":
+                "SKIPPED",
+
+            "reason":
+                "Could not determine live Crypto entry price",
+
+            "confirmation":
+                confirmation,
+
+            "paper_only":
+                True,
+
+            "real_orders":
+                False,
+        }
+
+    # ========================================================
+    # 6. BALANCE
+    # ========================================================
+
+    try:
+
+        balance = _safe_float(
+            trader.get_balance()
+        )
+
+    except Exception:
+
+        balance = 0.0
 
     if balance <= 0:
 
@@ -587,51 +1574,118 @@ def open_approved_trade(
                 False,
         }
 
-    # --------------------------------------------------------
-    # ACTIVE TP / SL
-    # --------------------------------------------------------
+    # ========================================================
+    # 7. LIVE EXECUTION GEOMETRY
+    # ========================================================
 
-    tp_pct = _safe_float(
-        _active_tp_pct(),
-        0.0,
-    )
-
-    sl_pct = _safe_float(
-        _active_sl_pct(),
-        0.0,
-    )
+    execution_levels = None
 
     if (
-        tp_pct <= 0
-        or sl_pct <= 0
+        strategy_entry > 0
+        and strategy_stop > 0
+        and strategy_target > 0
     ):
 
-        return {
-            "status":
-                "REJECTED",
+        execution_levels = (
+            _build_live_execution_levels(
+                signal=signal,
+                strategy_entry=
+                    strategy_entry,
+                strategy_stop=
+                    strategy_stop,
+                strategy_target=
+                    strategy_target,
+                live_entry=
+                    live_entry,
+            )
+        )
 
-            "reason":
-                "Invalid active TP/SL configuration",
+    if (
+        execution_levels
+        and execution_levels.get(
+            "valid",
+            False,
+        )
+    ):
 
-            "paper_only":
-                True,
+        # ----------------------------------------------------
+        # V5 EXPLICIT-PRICE RISK PLAN
+        # ----------------------------------------------------
 
-            "real_orders":
+        plan = (
+            calculate_trade_plan_from_prices(
+                balance=balance,
+                entry_price=
+                    execution_levels[
+                        "entry_price"
+                    ],
+                signal=signal,
+                stop_loss_price=
+                    execution_levels[
+                        "stop_loss"
+                    ],
+                take_profit_price=
+                    execution_levels[
+                        "take_profit"
+                    ],
+                risk_percent=
+                    RISK_PCT,
+            )
+        )
+
+        plan_source = (
+            "V5_STRATEGY_EXPLICIT_PRICES"
+        )
+
+    else:
+
+        if (
+            execution_levels
+            and not execution_levels.get(
+                "valid",
                 False,
-        }
+            )
+            and strategy_entry > 0
+        ):
 
-    # --------------------------------------------------------
-    # EXISTING CRYPTO RISK MANAGER
-    # --------------------------------------------------------
+            # Entry drift or malformed V5 strategy geometry
+            # should NOT silently fall back to legacy TP/SL.
+            return {
+                "status":
+                    "STALE_ENTRY",
 
-    plan = calculate_trade_plan(
-        balance=balance,
-        entry_price=entry_price,
-        signal=signal,
-        risk_percent=RISK_PCT,
-        stop_loss_percent=sl_pct,
-        take_profit_percent=tp_pct,
-    )
+                "reason":
+                    execution_levels.get(
+                        "reason",
+                        "V5 strategy entry is stale",
+                    ),
+
+                "execution_levels":
+                    execution_levels,
+
+                "confirmation":
+                    confirmation,
+
+                "paper_only":
+                    True,
+
+                "real_orders":
+                    False,
+            }
+
+        plan = _build_legacy_plan(
+            balance=balance,
+            entry_price=live_entry,
+            signal=signal,
+        )
+
+        plan_source = (
+            "LEGACY_PERCENT_FALLBACK"
+        )
+
+    # ========================================================
+    # 8. LOCAL RISK PLAN VALIDATION
+    # ========================================================
 
     if not validate_trade_plan(
         plan
@@ -639,13 +1693,22 @@ def open_approved_trade(
 
         return {
             "status":
-                "REJECTED",
+                "RISK_PLAN_REJECTED",
 
             "reason":
-                "Risk manager rejected plan",
+                plan.get(
+                    "reason",
+                    "V5 Risk Manager rejected plan",
+                ),
 
             "plan":
                 plan,
+
+            "plan_source":
+                plan_source,
+
+            "confirmation":
+                confirmation,
 
             "paper_only":
                 True,
@@ -657,75 +1720,46 @@ def open_approved_trade(
     quantity = _safe_float(
         plan.get(
             "quantity"
-        ),
-        0.0,
+        )
     )
 
     take_profit = _safe_float(
         plan.get(
             "take_profit"
-        ),
-        0.0,
+        )
     )
 
     stop_loss = _safe_float(
         plan.get(
             "stop_loss"
-        ),
-        0.0,
+        )
+    )
+
+    entry_price = _safe_float(
+        plan.get(
+            "entry_price"
+        )
+    )
+
+    reward_risk = _safe_float(
+        plan.get(
+            "reward_risk_ratio"
+        )
     )
 
     if (
         quantity <= 0
         or take_profit <= 0
         or stop_loss <= 0
+        or entry_price <= 0
     ):
 
         return {
             "status":
-                "REJECTED",
+                "RISK_PLAN_REJECTED",
 
             "reason":
-                "Risk plan contains invalid parameters",
-
-            "plan":
-                plan,
-
-            "paper_only":
-                True,
-
-            "real_orders":
-                False,
-        }
-
-    # --------------------------------------------------------
-    # TP / SL STRUCTURE VALIDATION
-    # --------------------------------------------------------
-
-    if signal == "BUY":
-
-        structure_valid = (
-            stop_loss
-            < entry_price
-            < take_profit
-        )
-
-    else:
-
-        structure_valid = (
-            take_profit
-            < entry_price
-            < stop_loss
-        )
-
-    if not structure_valid:
-
-        return {
-            "status":
-                "REJECTED",
-
-            "reason":
-                "Invalid Crypto TP/SL structure",
+                "Risk plan contains invalid values",
 
             "plan":
                 plan,
@@ -738,7 +1772,7 @@ def open_approved_trade(
         }
 
     # ========================================================
-    # PORTFOLIO RISK GOVERNOR
+    # 9. PORTFOLIO RISK GOVERNOR
     # ========================================================
 
     governor = authorize_trade(
@@ -749,6 +1783,9 @@ def open_approved_trade(
         stop_loss=stop_loss,
         quantity=quantity,
         risk_pct=RISK_PCT,
+        side=_signal_to_side(
+            signal
+        ),
     )
 
     if not governor.get(
@@ -763,7 +1800,10 @@ def open_approved_trade(
             "reason":
                 governor.get(
                     "reason",
-                    "Portfolio Risk Governor blocked Crypto trade",
+                    (
+                        "Portfolio Risk Governor "
+                        "blocked Crypto trade"
+                    ),
                 ),
 
             "governor":
@@ -772,6 +1812,9 @@ def open_approved_trade(
             "plan":
                 plan,
 
+            "confirmation":
+                confirmation,
+
             "paper_only":
                 True,
 
@@ -779,13 +1822,23 @@ def open_approved_trade(
                 False,
         }
 
-    # --------------------------------------------------------
-    # FINAL SLOT RECHECK
-    # --------------------------------------------------------
+    # ========================================================
+    # 10. FINAL SLOT RECHECK
+    # ========================================================
 
-    if not trader.slot_available(
-        CRYPTO_SLOT
-    ):
+    try:
+
+        final_slot_available = (
+            trader.slot_available(
+                CRYPTO_SLOT
+            )
+        )
+
+    except Exception:
+
+        final_slot_available = False
+
+    if not final_slot_available:
 
         return {
             "status":
@@ -805,18 +1858,80 @@ def open_approved_trade(
         }
 
     # ========================================================
-    # PAPER EXECUTION ONLY
+    # 11. PAPERTRADER CAPABILITY CHECK
     # ========================================================
 
-    result = trader.open_trade(
-        symbol=symbol,
-        signal=signal,
-        entry_price=entry_price,
-        quantity=quantity,
-        take_profit=take_profit,
-        stop_loss=stop_loss,
-        slot=CRYPTO_SLOT,
+    capability = (
+        _paper_trader_open_capability(
+            trader
+        )
     )
+
+    if not capability.get(
+        "ok",
+        False,
+    ):
+
+        return {
+            "status":
+                "ERROR",
+
+            "reason":
+                capability.get(
+                    "reason",
+                    "PaperTrader cannot open trade",
+                ),
+
+            "paper_only":
+                True,
+
+            "real_orders":
+                False,
+        }
+
+    # ========================================================
+    # 12. PAPER EXECUTION
+    # ========================================================
+
+    try:
+
+        result = trader.open_trade(
+            symbol=symbol,
+            signal=signal,
+            entry_price=entry_price,
+            quantity=quantity,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            slot=CRYPTO_SLOT,
+        )
+
+    except Exception as error:
+
+        return {
+            "status":
+                "ERROR",
+
+            "reason":
+                (
+                    "PaperTrader open_trade failed: "
+                    f"{error}"
+                ),
+
+            "plan":
+                plan,
+
+            "governor":
+                governor,
+
+            "confirmation":
+                confirmation,
+
+            "paper_only":
+                True,
+
+            "real_orders":
+                False,
+        }
 
     if not isinstance(
         result,
@@ -836,6 +1951,9 @@ def open_approved_trade(
             "governor":
                 governor,
 
+            "confirmation":
+                confirmation,
+
             "paper_only":
                 True,
 
@@ -843,12 +1961,19 @@ def open_approved_trade(
                 False,
         }
 
+    # ========================================================
+    # SUCCESS
+    # ========================================================
+
     return {
         "status":
             result.get(
                 "status",
                 "UNKNOWN",
             ),
+
+        "engine":
+            ENGINE_VERSION,
 
         "slot":
             CRYPTO_SLOT,
@@ -862,14 +1987,44 @@ def open_approved_trade(
         "entry_price":
             entry_price,
 
-        "tp_pct":
-            tp_pct,
+        "take_profit":
+            take_profit,
 
-        "sl_pct":
-            sl_pct,
+        "stop_loss":
+            stop_loss,
 
-        "test_mode":
-            TEST_MODE,
+        "quantity":
+            quantity,
+
+        "reward_risk_ratio":
+            reward_risk,
+
+        "confidence":
+            confidence,
+
+        "quality":
+            strategy_quality,
+
+        "target_hold_hours":
+            strategy_prices.get(
+                "target_hold_hours",
+                3.0,
+            ),
+
+        "plan_source":
+            plan_source,
+
+        "entry_drift_pct":
+            (
+                execution_levels.get(
+                    "entry_drift_pct"
+                )
+                if execution_levels
+                else None
+            ),
+
+        "strategy_confirmation":
+            confirmation,
 
         "plan":
             plan,
@@ -883,6 +2038,9 @@ def open_approved_trade(
         "result":
             result,
 
+        "lifecycle_authority":
+            "trade_lifecycle_engine",
+
         "paper_trade":
             True,
 
@@ -895,16 +2053,51 @@ def open_approved_trade(
 
 
 # ============================================================
-# MONITOR OPEN CRYPTO POSITION
+# READ-ONLY OPEN POSITION MONITOR
 # ============================================================
 
 def monitor_open_position(
     trader,
 ) -> Dict:
 
-    position = trader.get_position(
-        CRYPTO_SLOT
-    )
+    """
+    IMPORTANT V5 CHANGE
+
+    This function is intentionally READ-ONLY.
+
+    TP / SL / break-even / trailing / stale exit /
+    time exit are managed by trade_lifecycle_engine.py.
+
+    This prevents app.py and lifecycle runtime from both
+    attempting to close the same trade simultaneously.
+    """
+
+    try:
+
+        position = trader.get_position(
+            CRYPTO_SLOT
+        )
+
+    except Exception as error:
+
+        return {
+            "status":
+                "ERROR",
+
+            "reason":
+                str(
+                    error
+                ),
+
+            "slot":
+                CRYPTO_SLOT,
+
+            "paper_only":
+                True,
+
+            "real_orders":
+                False,
+        }
 
     if not position:
 
@@ -935,31 +2128,8 @@ def monitor_open_position(
         symbol
     )
 
-    if current_price is None:
-
-        return {
-            "status":
-                "WAITING FOR PRICE",
-
-            "slot":
-                CRYPTO_SLOT,
-
-            "symbol":
-                symbol,
-
-            "position":
-                position,
-
-            "paper_only":
-                True,
-
-            "real_orders":
-                False,
-        }
-
     current_price = _safe_float(
-        current_price,
-        0.0,
+        current_price
     )
 
     if current_price <= 0:
@@ -984,50 +2154,6 @@ def monitor_open_position(
                 False,
         }
 
-    # Explicit CRYPTO_MAIN protects Metals position.
-    result = trader.update_price(
-        current_price=current_price,
-        slot=CRYPTO_SLOT,
-    )
-
-    latest_position = trader.get_position(
-        CRYPTO_SLOT
-    )
-
-    if (
-        result
-        and result.get(
-            "status"
-        )
-        == "CLOSED"
-    ):
-
-        return {
-            "status":
-                "CLOSED",
-
-            "slot":
-                CRYPTO_SLOT,
-
-            "symbol":
-                symbol,
-
-            "current_price":
-                current_price,
-
-            "trade":
-                result,
-
-            "position":
-                None,
-
-            "paper_only":
-                True,
-
-            "real_orders":
-                False,
-        }
-
     return {
         "status":
             "OPEN",
@@ -1042,10 +2168,13 @@ def monitor_open_position(
             current_price,
 
         "position":
-            latest_position,
+            position,
 
-        "result":
-            result,
+        "management_authority":
+            "trade_lifecycle_engine",
+
+        "read_only_monitor":
+            True,
 
         "paper_only":
             True,
@@ -1056,16 +2185,36 @@ def monitor_open_position(
 
 
 # ============================================================
-# MANUAL CRYPTO PAPER CLOSE
+# MANUAL PAPER CLOSE
 # ============================================================
 
 def manual_close_position(
     trader,
 ) -> Dict:
 
-    position = trader.get_position(
-        CRYPTO_SLOT
-    )
+    try:
+
+        position = trader.get_position(
+            CRYPTO_SLOT
+        )
+
+    except Exception as error:
+
+        return {
+            "status":
+                "FAILED",
+
+            "reason":
+                str(
+                    error
+                ),
+
+            "paper_only":
+                True,
+
+            "real_orders":
+                False,
+        }
 
     if not position:
 
@@ -1096,14 +2245,18 @@ def manual_close_position(
         symbol
     )
 
-    if current_price is None:
+    current_price = _safe_float(
+        current_price
+    )
+
+    if current_price <= 0:
 
         return {
             "status":
                 "FAILED",
 
             "reason":
-                "Could not fetch current Crypto market price",
+                "Could not fetch current Crypto price",
 
             "position":
                 position,
@@ -1115,11 +2268,62 @@ def manual_close_position(
                 False,
         }
 
-    result = trader.close_trade(
-        exit_price=current_price,
-        reason="MANUAL_TEST_CLOSE",
-        slot=CRYPTO_SLOT,
-    )
+    try:
+
+        result = trader.close_trade(
+            exit_price=current_price,
+            reason="MANUAL_TEST_CLOSE",
+            slot=CRYPTO_SLOT,
+        )
+
+    except Exception as error:
+
+        return {
+            "status":
+                "FAILED",
+
+            "reason":
+                str(
+                    error
+                ),
+
+            "position":
+                position,
+
+            "paper_only":
+                True,
+
+            "real_orders":
+                False,
+        }
+
+    if not isinstance(
+        result,
+        dict,
+    ):
+
+        return {
+            "status":
+                "UNKNOWN",
+
+            "slot":
+                CRYPTO_SLOT,
+
+            "symbol":
+                symbol,
+
+            "exit_price":
+                current_price,
+
+            "result":
+                result,
+
+            "paper_only":
+                True,
+
+            "real_orders":
+                False,
+        }
 
     return {
         "status":
@@ -1149,56 +2353,80 @@ def manual_close_position(
 
 
 # ============================================================
-# TRADE MANAGEMENT SNAPSHOT
+# MANAGEMENT SNAPSHOT
 # ============================================================
 
 def trade_management_snapshot(
     trader,
 ) -> Dict:
 
-    position = trader.get_position(
-        CRYPTO_SLOT
-    )
+    try:
+
+        position = trader.get_position(
+            CRYPTO_SLOT
+        )
+
+    except Exception:
+
+        position = None
 
     return {
         "engine":
-            "V4.1 Crypto Paper Execution",
+            ENGINE_VERSION,
 
         "slot":
             CRYPTO_SLOT,
 
-        "test_mode":
-            TEST_MODE,
+        "strategy_engine":
+            "V5 Intraday Confluence",
+
+        "risk_manager":
+            "V5 Local Trade Risk Manager",
+
+        "portfolio_governor":
+            True,
+
+        "lifecycle_authority":
+            "trade_lifecycle_engine",
 
         "risk_pct":
             RISK_PCT,
 
-        "active_tp_pct":
+        "execution_min_confidence":
+            MIN_EXECUTION_CONFIDENCE,
+
+        "allowed_qualities":
+            sorted(
+                ALLOWED_STRATEGY_QUALITIES
+            ),
+
+        "max_entry_drift_pct":
+            MAX_ENTRY_DRIFT_PCT,
+
+        "max_entry_drift_stop_fraction":
+            MAX_ENTRY_DRIFT_STOP_FRACTION,
+
+        "shift_strategy_levels_to_live_entry":
+            SHIFT_STRATEGY_LEVELS_TO_LIVE_ENTRY,
+
+        "legacy_percent_fallback":
+            ALLOW_LEGACY_PERCENT_FALLBACK,
+
+        "legacy_tp_pct":
             _active_tp_pct(),
 
-        "active_sl_pct":
+        "legacy_sl_pct":
             _active_sl_pct(),
 
-        "trailing_stop_enabled":
-            TRAILING_STOP_ENABLED,
-
-        "trailing_stop_pct":
-            TRAILING_STOP_PCT,
-
-        "break_even_enabled":
-            BREAK_EVEN_ENABLED,
-
-        "break_even_trigger_pct":
-            BREAK_EVEN_TRIGGER_PCT,
-
-        "portfolio_governor":
-            True,
+        "test_mode":
+            TEST_MODE,
 
         "position":
             position,
 
         "has_position":
-            position is not None,
+            position
+            is not None,
 
         "paper_only":
             True,
@@ -1224,13 +2452,37 @@ def crypto_trade_engine_health(
             True,
 
         "engine":
-            "V4.1 Crypto Paper Execution",
+            ENGINE_VERSION,
 
         "slot":
             CRYPTO_SLOT,
 
+        "strategy_aware":
+            True,
+
+        "explicit_strategy_sl_tp":
+            True,
+
+        "live_entry_drift_filter":
+            True,
+
+        "risk_based_position_sizing":
+            True,
+
         "portfolio_governor":
             True,
+
+        "lifecycle_authority":
+            "trade_lifecycle_engine",
+
+        "duplicate_position_management":
+            False,
+
+        "execution_min_confidence":
+            MIN_EXECUTION_CONFIDENCE,
+
+        "legacy_percent_fallback":
+            ALLOW_LEGACY_PERCENT_FALLBACK,
 
         "paper_only":
             True,
@@ -1243,15 +2495,6 @@ def crypto_trade_engine_health(
 
         "test_mode":
             TEST_MODE,
-
-        "risk_pct":
-            RISK_PCT,
-
-        "active_tp_pct":
-            _active_tp_pct(),
-
-        "active_sl_pct":
-            _active_sl_pct(),
     }
 
     if trader is not None:
@@ -1271,6 +2514,14 @@ def crypto_trade_engine_health(
                     "position"
                 ]
                 is not None
+            )
+
+            result[
+                "paper_trader_capability"
+            ] = (
+                _paper_trader_open_capability(
+                    trader
+                )
             )
 
         except Exception as error:
