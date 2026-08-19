@@ -1,7 +1,7 @@
 """
 app.py
 
-PRO AI QUANT TERMINAL V5.3.1 ASYNC RUNTIME
+PRO AI QUANT TERMINAL V5.4 ASYNC RUNTIME
 Institutional multi-asset paper-trading terminal.
 
 Design goals
@@ -97,12 +97,12 @@ except Exception as _health_import_error:
 # PLATFORM CONSTANTS
 # ============================================================
 
-PLATFORM_VERSION = "V5.3.1-ASYNC-RUNTIME"
+PLATFORM_VERSION = "V5.4-PERFORMANCE-RUNTIME"
 PAPER_ONLY = True
 REAL_EXECUTION_ENABLED = False
 METALS_SCAN_SECONDS = 300
 CRYPTO_SCAN_SECONDS = max(30, int(os.environ.get("CRYPTO_SCAN_SECONDS", "60")))
-UI_REFRESH_SECONDS = max(30, int(os.environ.get("UI_REFRESH_SECONDS", "30")))
+UI_REFRESH_SECONDS = max(45, int(os.environ.get("UI_REFRESH_SECONDS", "60")))
 CORE_TICKERS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
 NAV_ITEMS = [
     "Command",
@@ -794,6 +794,7 @@ _RUNTIME_STATE_SCHEMA_READY = ensure_runtime_state_schema()
 # ============================================================
 
 @st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=90, show_spinner=False)
 def get_regime_data(symbol: str) -> Dict[str, Any]:
     try:
         candles = get_candles(
@@ -840,6 +841,23 @@ def build_crypto_correlation():
         except Exception:
             continue
     return correlation_matrix(candle_map)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_cached_ticker(symbol: str) -> Dict[str, Any]:
+    """Fast UI ticker cache; autonomous trading does not depend on it."""
+    try:
+        ticker = get_ticker(
+            symbol=symbol,
+            exchange="PUBLIC",
+            api_key="",
+            api_secret="",
+            use_testnet=False,
+        )
+        return dict(ticker or {})
+    except Exception as error:
+        print(f"[V5.4 UI CACHE] ticker {symbol} failed: {error}", flush=True)
+        return {}
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -1239,12 +1257,8 @@ def live_terminal() -> None:
                 chart_symbol = st.selectbox("Primary Market", SCAN_MARKETS, key="chart_pair", label_visibility="collapsed")
             with row2:
                 try:
-                    ticker = get_ticker(
-                        symbol=chart_symbol,
-                        exchange="PUBLIC",
-                        api_key="",
-                        api_secret="",
-                        use_testnet=False,
+                    ticker = get_cached_ticker(
+                        chart_symbol
                     )
                     if ticker:
                         st.caption(
@@ -1588,7 +1602,7 @@ def start_crypto_autonomous_runtime():
         "lock_acquired": False,
         "last_error": None,
         "last_scan_at": None,
-        "runtime_version": "V5.3.1",
+        "runtime_version": "V5.4",
     }
 
     if not database_url:
@@ -1620,7 +1634,7 @@ def start_crypto_autonomous_runtime():
         write_runtime_state(
             "crypto_runtime",
             {
-                "runtime_version": "V5.3.1",
+                "runtime_version": "V5.4",
                 "status": status,
                 "market": market,
                 "signal": signal,
@@ -1664,14 +1678,31 @@ def start_crypto_autonomous_runtime():
             )
             return
 
+        scan_started_m = time.monotonic()
+
+        publish_snapshot(
+            status="SCANNING",
+            reason=(
+                f"Autonomous scanner is evaluating "
+                f"{len(SCAN_MARKETS)} crypto markets."
+            ),
+        )
+
         log(
             f"Scanning {len(SCAN_MARKETS)} crypto markets."
         )
 
         results = scan_markets()
 
+        scan_seconds = time.monotonic() - scan_started_m
+
         if not isinstance(results, list):
             results = []
+
+        log(
+            f"Scan completed | markets={len(SCAN_MARKETS)} | "
+            f"results={len(results)} | duration={scan_seconds:.2f}s"
+        )
 
         summary = scanner_summary(results) or {}
 
@@ -1713,6 +1744,10 @@ def start_crypto_autonomous_runtime():
                 confidence=0.0,
                 reason=reason or "Scanner found no qualifying setup.",
                 scanner_results=results,
+            )
+            log(
+                f"Cycle completed | market={market} | signal={signal} | "
+                f"score={score:+.1f} | status=NO QUALIFYING TRADE"
             )
             return
 
@@ -1761,6 +1796,11 @@ def start_crypto_autonomous_runtime():
                 reason=reason,
                 scanner_results=results,
                 strategy=confirmation,
+            )
+            log(
+                f"Cycle completed | market={market} | signal={signal} | "
+                f"score={score:+.1f} | confidence={confidence:.1f}% | "
+                "status=WAITING FOR V5 CONFIRMATION"
             )
             return
 
@@ -1932,11 +1972,14 @@ def start_crypto_autonomous_runtime():
                         continue
 
                     if force_requested or regular_due:
+                        # Anchor cadence before scan so a slow scan does not
+                        # add another full poll interval after it completes.
+                        last_scan_monotonic = time.monotonic()
+
                         run_one_scan(
                             trader
                         )
 
-                        last_scan_monotonic = time.monotonic()
                         state["last_scan_at"] = utc_now().isoformat()
                         state["last_error"] = None
 
