@@ -1489,3 +1489,451 @@ def start_metals_auto_bootstrap():
 
 
 _metals_auto_bootstrap_thread = start_metals_auto_bootstrap()
+
+# ============================================================
+# V5.2 AUTONOMOUS TRADE LIFECYCLE RUNTIME
+# Existing Render Web Service
+# NO additional paid Background Worker
+# ============================================================
+
+@st.cache_resource
+def start_trade_lifecycle_runtime(
+    _trader,
+):
+    """
+    Starts exactly one lifecycle-management runtime per
+    Streamlit process.
+
+    Design
+    ------
+    - Uses existing PaperTrader instance.
+    - PostgreSQL advisory lock prevents duplicate lifecycle
+      managers across processes.
+    - Evaluates open positions approximately every 60 seconds.
+    - Applies existing TP/SL first.
+    - Then lifecycle rules:
+        * max 24h hold
+        * break-even
+        * trailing
+        * stale/no-progress exit
+        * lifecycle audit
+    - Does not open trades.
+    - PAPER ONLY.
+    - REAL EXECUTION DISABLED.
+    """
+
+    import threading
+    import time
+    import traceback
+
+    from trade_lifecycle_engine import (
+        RECOMMENDED_CYCLE_SECONDS,
+        acquire_lifecycle_runtime_lock,
+        paper_trader_capabilities,
+        release_lifecycle_runtime_lock,
+        run_lifecycle_cycle,
+        trade_lifecycle_health,
+    )
+
+    state = {
+        "started": False,
+        "thread_alive": False,
+        "lock_acquired": False,
+        "last_cycle": None,
+        "last_error": None,
+        "last_action": "INITIALIZING",
+        "runtime_version": "V5.2",
+    }
+
+    def log(
+        message,
+    ):
+        print(
+            "[TRADE LIFECYCLE] "
+            + str(message),
+            flush=True,
+        )
+
+    def lifecycle_loop():
+
+        lock_connection = None
+
+        state[
+            "thread_alive"
+        ] = True
+
+        try:
+
+            # ------------------------------------------------
+            # SINGLE-RUNTIME DISTRIBUTED LOCK
+            # ------------------------------------------------
+
+            lock_connection = (
+                acquire_lifecycle_runtime_lock()
+            )
+
+            if lock_connection is None:
+
+                state[
+                    "last_action"
+                ] = "LOCK_NOT_ACQUIRED"
+
+                log(
+                    "Another lifecycle runtime already owns "
+                    "the PostgreSQL advisory lock. "
+                    "This runtime will stay disabled."
+                )
+
+                return
+
+            state[
+                "lock_acquired"
+            ] = True
+
+            state[
+                "last_action"
+            ] = "LOCK_ACQUIRED"
+
+            log(
+                "Lifecycle runtime lock acquired."
+            )
+
+            # ------------------------------------------------
+            # PAPERTRADER CAPABILITY CHECK
+            # ------------------------------------------------
+
+            capabilities = (
+                paper_trader_capabilities(
+                    _trader
+                )
+            )
+
+            methods = (
+                capabilities.get(
+                    "methods",
+                    {},
+                )
+            )
+
+            get_positions_ok = bool(
+                methods.get(
+                    "get_positions",
+                    {},
+                ).get(
+                    "available",
+                    False,
+                )
+            )
+
+            close_trade_ok = bool(
+                methods.get(
+                    "close_trade",
+                    {},
+                ).get(
+                    "available",
+                    False,
+                )
+            )
+
+            if not get_positions_ok:
+
+                state[
+                    "last_error"
+                ] = (
+                    "PaperTrader.get_positions "
+                    "is unavailable."
+                )
+
+                state[
+                    "last_action"
+                ] = "CAPABILITY_ERROR"
+
+                log(
+                    state[
+                        "last_error"
+                    ]
+                )
+
+                return
+
+            if not close_trade_ok:
+
+                state[
+                    "last_error"
+                ] = (
+                    "PaperTrader.close_trade "
+                    "is unavailable."
+                )
+
+                state[
+                    "last_action"
+                ] = "CAPABILITY_ERROR"
+
+                log(
+                    state[
+                        "last_error"
+                    ]
+                )
+
+                return
+
+            # ------------------------------------------------
+            # INITIAL HEALTH CHECK
+            # ------------------------------------------------
+
+            try:
+
+                health = (
+                    trade_lifecycle_health(
+                        _trader
+                    )
+                )
+
+                log(
+                    "Lifecycle engine health: "
+                    f"{health.get('ok', False)}"
+                )
+
+            except Exception as error:
+
+                log(
+                    "Lifecycle health check warning: "
+                    f"{error}"
+                )
+
+            # ------------------------------------------------
+            # MAIN AUTONOMOUS LOOP
+            # ------------------------------------------------
+
+            while True:
+
+                try:
+
+                    result = (
+                        run_lifecycle_cycle(
+                            _trader
+                        )
+                    )
+
+                    state[
+                        "last_cycle"
+                    ] = result
+
+                    state[
+                        "last_error"
+                    ] = None
+
+                    state[
+                        "last_action"
+                    ] = (
+                        result.get(
+                            "status",
+                            "UNKNOWN",
+                        )
+                    )
+
+                    positions_evaluated = (
+                        result.get(
+                            "positions_evaluated",
+                            0,
+                        )
+                    )
+
+                    positions_closed = (
+                        result.get(
+                            "positions_closed",
+                            0,
+                        )
+                    )
+
+                    positions_open = (
+                        result.get(
+                            "positions_open",
+                            0,
+                        )
+                    )
+
+                    log(
+                        "Cycle completed | "
+                        f"evaluated={positions_evaluated} | "
+                        f"open={positions_open} | "
+                        f"closed={positions_closed} | "
+                        f"status="
+                        f"{result.get('status', 'UNKNOWN')}"
+                    )
+
+                    # ----------------------------------------
+                    # IMPORTANT NON-HOLD EVENTS
+                    # ----------------------------------------
+
+                    for item in (
+                        result.get(
+                            "results",
+                            []
+                        )
+                        or []
+                    ):
+
+                        if not isinstance(
+                            item,
+                            dict,
+                        ):
+
+                            continue
+
+                        action = (
+                            item.get(
+                                "action"
+                            )
+                        )
+
+                        status = (
+                            item.get(
+                                "status"
+                            )
+                        )
+
+                        symbol = (
+                            item.get(
+                                "symbol",
+                                "UNKNOWN",
+                            )
+                        )
+
+                        if action in (
+                            None,
+                            "",
+                            "HOLD",
+                        ):
+
+                            continue
+
+                        log(
+                            "Lifecycle action | "
+                            f"{symbol} | "
+                            f"{action} | "
+                            f"{status}"
+                        )
+
+                    # ----------------------------------------
+                    # DEGRADED / ERROR VISIBILITY
+                    # ----------------------------------------
+
+                    if not result.get(
+                        "ok",
+                        False,
+                    ):
+
+                        errors = (
+                            result.get(
+                                "errors",
+                                [],
+                            )
+                        )
+
+                        log(
+                            "Lifecycle cycle degraded: "
+                            f"{errors}"
+                        )
+
+                except Exception as error:
+
+                    state[
+                        "last_error"
+                    ] = str(
+                        error
+                    )
+
+                    state[
+                        "last_action"
+                    ] = "CYCLE_ERROR"
+
+                    log(
+                        "Unhandled lifecycle cycle error: "
+                        f"{error}"
+                    )
+
+                    traceback.print_exc()
+
+                # --------------------------------------------
+                # RECOMMENDED 60-SECOND CADENCE
+                # --------------------------------------------
+
+                time.sleep(
+                    max(
+                        15,
+                        int(
+                            RECOMMENDED_CYCLE_SECONDS
+                        ),
+                    )
+                )
+
+        except Exception as error:
+
+            state[
+                "last_error"
+            ] = str(
+                error
+            )
+
+            state[
+                "last_action"
+            ] = "STARTUP_ERROR"
+
+            log(
+                "Lifecycle runtime startup error: "
+                f"{error}"
+            )
+
+            traceback.print_exc()
+
+        finally:
+
+            if lock_connection is not None:
+
+                try:
+
+                    release_lifecycle_runtime_lock(
+                        lock_connection
+                    )
+
+                except Exception:
+
+                    pass
+
+            state[
+                "lock_acquired"
+            ] = False
+
+            state[
+                "thread_alive"
+            ] = False
+
+            log(
+                "Lifecycle runtime stopped."
+            )
+
+    thread = threading.Thread(
+        target=lifecycle_loop,
+        name="trade-lifecycle-v5",
+        daemon=True,
+    )
+
+    thread.start()
+
+    state[
+        "started"
+    ] = True
+
+    return state
+
+
+# ============================================================
+# START AUTONOMOUS TRADE LIFECYCLE
+# ============================================================
+
+_trade_lifecycle_runtime_state = (
+    start_trade_lifecycle_runtime(
+        st.session_state.paper_trader
+    )
+)
