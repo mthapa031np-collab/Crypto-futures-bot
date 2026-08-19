@@ -1,7 +1,7 @@
 """
 app.py
 
-PRO AI QUANT TERMINAL V5.3 ASYNC RUNTIME
+PRO AI QUANT TERMINAL V5.3.1 ASYNC RUNTIME
 Institutional multi-asset paper-trading terminal.
 
 Design goals
@@ -97,7 +97,7 @@ except Exception as _health_import_error:
 # PLATFORM CONSTANTS
 # ============================================================
 
-PLATFORM_VERSION = "V5.3-ASYNC-RUNTIME"
+PLATFORM_VERSION = "V5.3.1-ASYNC-RUNTIME"
 PAPER_ONLY = True
 REAL_EXECUTION_ENABLED = False
 METALS_SCAN_SECONDS = 300
@@ -573,87 +573,125 @@ def write_runtime_state(
     state_key: str,
     payload: Dict[str, Any],
 ) -> bool:
-    try:
-        safe_payload = _json_safe(payload)
-        encoded = json.dumps(
-            safe_payload,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        )
+    """
+    Persist runtime state.
 
-        with _runtime_db_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    INSERT INTO {RUNTIME_STATE_TABLE}
-                        (state_key, payload, updated_at)
-                    VALUES
-                        (%s, %s::jsonb, NOW())
-                    ON CONFLICT (state_key)
-                    DO UPDATE SET
-                        payload = EXCLUDED.payload,
-                        updated_at = NOW()
-                    """,
-                    (
-                        str(state_key),
-                        encoded,
-                    ),
-                )
+    Self-healing behavior:
+    if the runtime table is missing after a fresh deploy/database,
+    create it and retry once automatically.
+    """
+    safe_payload = _json_safe(payload)
+    encoded = json.dumps(
+        safe_payload,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
 
-        return True
+    for attempt in range(2):
+        try:
+            with _runtime_db_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        INSERT INTO {RUNTIME_STATE_TABLE}
+                            (state_key, payload, updated_at)
+                        VALUES
+                            (%s, %s::jsonb, NOW())
+                        ON CONFLICT (state_key)
+                        DO UPDATE SET
+                            payload = EXCLUDED.payload,
+                            updated_at = NOW()
+                        """,
+                        (
+                            str(state_key),
+                            encoded,
+                        ),
+                    )
 
-    except Exception as error:
-        print(
-            f"[V5.3 RUNTIME STATE] Write {state_key} failed: {error}",
-            flush=True,
-        )
-        return False
+            return True
+
+        except psycopg.errors.UndefinedTable:
+            if attempt == 0 and ensure_runtime_state_schema():
+                continue
+
+            print(
+                f"[V5.3.1 RUNTIME STATE] "
+                f"Write {state_key} failed because schema is unavailable.",
+                flush=True,
+            )
+            return False
+
+        except Exception as error:
+            print(
+                f"[V5.3.1 RUNTIME STATE] Write {state_key} failed: {error}",
+                flush=True,
+            )
+            return False
+
+    return False
 
 
 def read_runtime_state(
     state_key: str,
     default: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """
+    Read runtime state with automatic first-deploy schema recovery.
+    """
     fallback = dict(default or {})
 
-    try:
-        with _runtime_db_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    SELECT payload, updated_at
-                    FROM {RUNTIME_STATE_TABLE}
-                    WHERE state_key = %s
-                    """,
-                    (str(state_key),),
-                )
+    for attempt in range(2):
+        try:
+            with _runtime_db_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT payload, updated_at
+                        FROM {RUNTIME_STATE_TABLE}
+                        WHERE state_key = %s
+                        """,
+                        (str(state_key),),
+                    )
 
-                row = cur.fetchone()
+                    row = cur.fetchone()
 
-        if not row:
+            if not row:
+                return fallback
+
+            payload = row[0]
+
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+
+            if not isinstance(payload, dict):
+                return fallback
+
+            result = dict(payload)
+
+            if row[1] is not None:
+                result["_updated_at"] = row[1].isoformat()
+
+            return result
+
+        except psycopg.errors.UndefinedTable:
+            if attempt == 0 and ensure_runtime_state_schema():
+                continue
+
+            print(
+                f"[V5.3.1 RUNTIME STATE] "
+                f"Read {state_key} failed because schema is unavailable.",
+                flush=True,
+            )
             return fallback
 
-        payload = row[0]
-
-        if isinstance(payload, str):
-            payload = json.loads(payload)
-
-        if not isinstance(payload, dict):
+        except Exception as error:
+            print(
+                f"[V5.3.1 RUNTIME STATE] Read {state_key} failed: {error}",
+                flush=True,
+            )
             return fallback
 
-        result = dict(payload)
-
-        if row[1] is not None:
-            result["_updated_at"] = row[1].isoformat()
-
-        return result
-
-    except Exception as error:
-        print(
-            f"[V5.3 RUNTIME STATE] Read {state_key} failed: {error}",
-            flush=True,
-        )
-        return fallback
+    return fallback
 
 
 def get_crypto_control() -> Dict[str, Any]:
@@ -744,6 +782,11 @@ def sync_crypto_runtime_snapshot() -> None:
 
     if isinstance(strategy, dict):
         st.session_state.crypto_strategy_result = strategy
+
+
+# Initialize persistent runtime state before any UI control reads it.
+# Safe and idempotent because the table is created with IF NOT EXISTS.
+_RUNTIME_STATE_SCHEMA_READY = ensure_runtime_state_schema()
 
 
 # ============================================================
@@ -1545,7 +1588,7 @@ def start_crypto_autonomous_runtime():
         "lock_acquired": False,
         "last_error": None,
         "last_scan_at": None,
-        "runtime_version": "V5.3",
+        "runtime_version": "V5.3.1",
     }
 
     if not database_url:
@@ -1577,7 +1620,7 @@ def start_crypto_autonomous_runtime():
         write_runtime_state(
             "crypto_runtime",
             {
-                "runtime_version": "V5.3",
+                "runtime_version": "V5.3.1",
                 "status": status,
                 "market": market,
                 "signal": signal,
