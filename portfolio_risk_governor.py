@@ -1,7 +1,7 @@
 """
 portfolio_risk_governor.py
 
-PRO AI QUANT TERMINAL V5.1
+PRO AI QUANT TERMINAL V5.2
 UNIFIED MULTI-ASSET PORTFOLIO RISK GOVERNOR
 WITH AUTOMATIC LOSS-STREAK RECOVERY
 
@@ -12,8 +12,13 @@ Central account-level PAPER risk authority for:
 - METALS
 - future STOCK / FX / INDEX / FUTURES adapters
 
-Key V5.1 change
+Key V5.2 change
 ---------------
+V5.2 adds precision-safe percentage limit comparisons so microscopic
+floating-point/quantity-rounding noise at an exact configured risk
+boundary does not falsely reject a trade. A genuine excess above the
+tolerance remains blocked.
+
 The old V5.0 logic permanently blocked new entries once
 MAX_CONSECUTIVE_LOSSES was reached. Because no new trade could
 open, the streak could never be broken by a later winning trade.
@@ -60,7 +65,7 @@ from paper_trader import (
 # VERSION / HARD SAFETY
 # ============================================================
 
-ENGINE_VERSION = "V5.1 Portfolio Risk Governor"
+ENGINE_VERSION = "V5.2 Portfolio Risk Governor"
 
 PAPER_ONLY = True
 REAL_EXECUTION_ENABLED = False
@@ -265,6 +270,17 @@ MAX_FUTURES_RISK_PCT = _env_float(
     maximum=100.0,
 )
 
+# V5.2: percentage-point tolerance used only for boundary comparisons.
+# Default 1e-6 means 0.000001 percentage points (not 0.000001 as a fraction).
+# This absorbs harmless IEEE-754 / quantity-rounding noise while preserving
+# every material configured risk limit.
+RISK_COMPARISON_EPSILON_PCT = _env_float(
+    "RISK_COMPARISON_EPSILON_PCT",
+    1e-6,
+    minimum=0.0,
+    maximum=0.01,
+)
+
 
 # ============================================================
 # ASSET SUPPORT
@@ -319,6 +335,28 @@ def _safe_float(
     ):
         return default
 
+
+
+
+def _risk_pct_exceeds_limit(
+    value_pct,
+    limit_pct,
+) -> bool:
+    """Precision-safe strict risk-limit comparison in percentage points."""
+
+    value = _safe_float(
+        value_pct,
+        default=float("inf"),
+    )
+    limit = _safe_float(
+        limit_pct,
+        default=float("-inf"),
+    )
+
+    return value > (
+        limit
+        + RISK_COMPARISON_EPSILON_PCT
+    )
 
 def _safe_positive_float(
     value,
@@ -2022,9 +2060,9 @@ def authorize_trade(
                 normalized_side,
         )
 
-    if (
-        proposed_risk_pct
-        > asset_risk_limit
+    if _risk_pct_exceeds_limit(
+        proposed_risk_pct,
+        asset_risk_limit,
     ):
         return _decision(
             approved=False,
@@ -2078,9 +2116,9 @@ def authorize_trade(
                     normalized_side,
             )
 
-        if (
-            requested_risk_pct
-            > asset_risk_limit
+        if _risk_pct_exceeds_limit(
+            requested_risk_pct,
+            asset_risk_limit,
         ):
             return _decision(
                 approved=False,
@@ -2121,9 +2159,9 @@ def authorize_trade(
         * 100.0
     )
 
-    if (
-        projected_risk_pct
-        > MAX_PORTFOLIO_RISK_PCT
+    if _risk_pct_exceeds_limit(
+        projected_risk_pct,
+        MAX_PORTFOLIO_RISK_PCT,
     ):
         return _decision(
             approved=False,
