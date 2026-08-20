@@ -1284,7 +1284,7 @@ def live_terminal() -> None:
             analytic_symbol = (
                 st.session_state.crypto_market
                 if st.session_state.crypto_market not in ("", "—")
-                else st.session_state.chart_pair
+                else st.session_state.get("chart_pair", "BTCUSDT")
             )
             regime = get_regime_data(analytic_symbol)
             intelligence = scanner_intelligence(st.session_state.crypto_scanner_results)
@@ -1385,7 +1385,7 @@ def live_terminal() -> None:
             else (
                 st.session_state.crypto_market
                 if st.session_state.crypto_market not in ("", "—")
-                else st.session_state.chart_pair
+                else st.session_state.get("chart_pair", "BTCUSDT")
             )
         )
         regime = get_regime_data(analytics_symbol)
