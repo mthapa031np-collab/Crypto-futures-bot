@@ -75,6 +75,12 @@ from analytics_engine import (
 from metals_dashboard import render_metals_dashboard
 from metals_trade_engine import run_metals_cycle, get_metals_current_price
 from control_center_ui import render_control_center
+from trade_lifecycle_engine import (
+    RECOMMENDED_CYCLE_SECONDS as LIFECYCLE_CYCLE_SECONDS,
+    acquire_lifecycle_runtime_lock,
+    release_lifecycle_runtime_lock,
+    run_lifecycle_cycle,
+)
 
 # ============================================================
 # OPTIONAL SYSTEM HEALTH ADAPTER
@@ -2070,6 +2076,131 @@ def start_crypto_autonomous_runtime():
 _crypto_autonomous_runtime_state = (
     start_crypto_autonomous_runtime()
 )
+
+
+# ============================================================
+# V5.5 AUTONOMOUS MULTI-ASSET TRADE LIFECYCLE RUNTIME
+# Canonical manager for all already-open PAPER positions
+# Existing Render Web Service only — no new paid worker
+# ============================================================
+
+@st.cache_resource
+def start_trade_lifecycle_runtime():
+    """
+    Start exactly one durable lifecycle scheduler across deployed processes.
+
+    Responsibilities
+    ----------------
+    - Manage already-open CRYPTO_MAIN and METALS_MAIN paper positions.
+    - Run existing PaperTrader TP/SL checks first.
+    - Enforce lifecycle max-hold, break-even, trailing and stale exits.
+    - Use the lifecycle engine's PostgreSQL advisory lock so multiple
+      Streamlit processes cannot become competing lifecycle authorities.
+    - Never call Streamlit APIs from the worker thread.
+    - Never open a trade and never place a real order.
+    """
+
+    state = {
+        "started": False,
+        "thread_alive": False,
+        "lock_acquired": False,
+        "last_cycle_at": None,
+        "last_status": "STARTING",
+        "last_error": None,
+        "runtime_version": "V5.5-LIFECYCLE",
+        "cycle_seconds": int(LIFECYCLE_CYCLE_SECONDS),
+        "paper_only": True,
+    }
+
+    if not os.environ.get("DATABASE_URL", "").strip():
+        state["last_status"] = "DISABLED"
+        state["last_error"] = "DATABASE_URL is not configured"
+        print(
+            "[LIFECYCLE RUNTIME] DATABASE_URL is not configured.",
+            flush=True,
+        )
+        return state
+
+    def log(message: Any) -> None:
+        print(f"[LIFECYCLE RUNTIME] {message}", flush=True)
+
+    def worker_loop() -> None:
+        lock_connection = None
+        state["thread_alive"] = True
+
+        try:
+            lock_connection = acquire_lifecycle_runtime_lock()
+
+            if lock_connection is None:
+                state["last_status"] = "STANDBY"
+                state["last_error"] = "LOCK_NOT_ACQUIRED"
+                log(
+                    "Another deployed process owns the lifecycle lock; "
+                    "this process remains standby."
+                )
+                return
+
+            state["lock_acquired"] = True
+            state["last_status"] = "RUNNING"
+            state["last_error"] = None
+            log("PostgreSQL advisory lock acquired.")
+
+            trader = PaperTrader(starting_balance=PAPER_BALANCE)
+
+            while True:
+                cycle_started = time.monotonic()
+
+                try:
+                    result = run_lifecycle_cycle(trader)
+                    state["last_cycle_at"] = utc_now().isoformat()
+                    state["last_status"] = str(result.get("status", "UNKNOWN"))
+                    state["last_error"] = None
+
+                    if result.get("positions_evaluated", 0):
+                        log(
+                            "cycle | "
+                            f"status={result.get('status')} | "
+                            f"evaluated={result.get('positions_evaluated', 0)} | "
+                            f"closed={result.get('positions_closed', 0)}"
+                        )
+
+                except Exception as error:
+                    state["last_status"] = "ERROR"
+                    state["last_error"] = str(error)
+                    log(f"Cycle error: {error}")
+
+                elapsed = time.monotonic() - cycle_started
+                sleep_seconds = max(
+                    1.0,
+                    float(LIFECYCLE_CYCLE_SECONDS) - elapsed,
+                )
+                time.sleep(sleep_seconds)
+
+        except Exception as error:
+            state["last_status"] = "ERROR"
+            state["last_error"] = str(error)
+            log(f"Startup error: {error}")
+
+        finally:
+            if lock_connection is not None:
+                release_lifecycle_runtime_lock(lock_connection)
+
+            state["lock_acquired"] = False
+            state["thread_alive"] = False
+            log("Runtime stopped.")
+
+    thread = threading.Thread(
+        target=worker_loop,
+        name="trade-lifecycle-v5-5",
+        daemon=True,
+    )
+    thread.start()
+    state["started"] = True
+    state["thread"] = thread
+    return state
+
+
+_trade_lifecycle_runtime_state = start_trade_lifecycle_runtime()
 
 
 # ============================================================
