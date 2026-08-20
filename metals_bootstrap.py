@@ -1,8 +1,8 @@
 """
 metals_bootstrap.py
 
-PRO AI QUANT TERMINAL V4.3.1
-SCHEMA-SAFE HYBRID METALS HISTORICAL BOOTSTRAP ENGINE
+PRO AI QUANT TERMINAL V4.3.2
+SAFE-FAST SCHEMA-SAFE HYBRID METALS HISTORICAL BOOTSTRAP ENGINE
 
 Architecture
 ------------
@@ -21,6 +21,12 @@ LONG TERM:
     Canonical local 15m
         ↓
     Local 1h / 4h resampling
+
+V4.3.2 upgrade
+--------------
+- Safe-fast free-plan historical budget: 9 requests/hour
+- Keeps one request/hour headroom below Gold-API free 10/hour ceiling
+- Existing schema, cursor, duplicate protection and paper-only safety preserved
 
 V4.3.1 upgrade
 --------------
@@ -72,7 +78,7 @@ GOLD_API_BASE_URL = "https://api.gold-api.com"
 REQUEST_TIMEOUT = 15
 
 # Keep below provider ceiling for safety.
-INTERNAL_REQUEST_LIMIT_PER_HOUR = 8
+INTERNAL_REQUEST_LIMIT_PER_HOUR = 9
 
 
 # ============================================================
@@ -1047,7 +1053,7 @@ def fetch_gold_api_ohlc(
             GOLD_API_KEY,
 
         "User-Agent":
-            "pro-ai-quant-terminal-v4.3.1",
+            "pro-ai-quant-terminal-v4.3.2-safe-fast",
     }
 
     provider_request_sent = False
