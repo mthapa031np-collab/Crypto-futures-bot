@@ -2258,8 +2258,11 @@ def start_metals_auto_bootstrap():
 
     database_url = os.environ.get("DATABASE_URL", "").strip()
     advisory_lock_id = 93739001
-    internal_hourly_limit = 8
-    request_interval_seconds = 480
+    # Gold-API Free allows 10 historical/OHLC requests per hour.
+    # Use 9/hour to preserve one-request safety headroom for retries/manual diagnostics.
+    internal_hourly_limit = 9
+    # 405s spacing => at most 9 automatic requests in a rolling hour.
+    request_interval_seconds = 405
     budget_wait_seconds = 600
     ready_sleep_seconds = 3600
     error_sleep_seconds = 120
