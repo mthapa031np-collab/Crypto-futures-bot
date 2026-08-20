@@ -492,7 +492,12 @@ def update_daily_risk() -> float:
 # ============================================================
 
 RUNTIME_STATE_TABLE = "pro_ai_runtime_state"
-CRYPTO_RUNTIME_LOCK_ID = 93739002
+# PostgreSQL advisory-lock registry:
+#   93739001 = Metals bootstrap runtime
+#   93739002 = Trade lifecycle runtime
+#   93739003 = Crypto autonomous scanner runtime
+# Keep these IDs unique: sharing an ID makes unrelated runtimes block each other.
+CRYPTO_RUNTIME_LOCK_ID = 93739003
 CRYPTO_RUNTIME_POLL_SECONDS = max(
     30,
     int(os.environ.get("CRYPTO_RUNTIME_POLL_SECONDS", "60")),
@@ -1608,7 +1613,7 @@ def start_crypto_autonomous_runtime():
         "lock_acquired": False,
         "last_error": None,
         "last_scan_at": None,
-        "runtime_version": "V5.6",
+        "runtime_version": "V5.7",
     }
 
     if not database_url:
@@ -1640,7 +1645,7 @@ def start_crypto_autonomous_runtime():
         write_runtime_state(
             "crypto_runtime",
             {
-                "runtime_version": "V5.6",
+                "runtime_version": "V5.7",
                 "status": status,
                 "market": market,
                 "signal": signal,
