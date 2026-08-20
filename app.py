@@ -1608,7 +1608,7 @@ def start_crypto_autonomous_runtime():
         "lock_acquired": False,
         "last_error": None,
         "last_scan_at": None,
-        "runtime_version": "V5.4",
+        "runtime_version": "V5.6",
     }
 
     if not database_url:
@@ -1640,7 +1640,7 @@ def start_crypto_autonomous_runtime():
         write_runtime_state(
             "crypto_runtime",
             {
-                "runtime_version": "V5.4",
+                "runtime_version": "V5.6",
                 "status": status,
                 "market": market,
                 "signal": signal,
@@ -1902,23 +1902,47 @@ def start_crypto_autonomous_runtime():
                 connect_timeout=10,
             )
 
-            with lock_connection.cursor() as cur:
-                cur.execute(
-                    "SELECT pg_try_advisory_lock(%s)",
-                    (CRYPTO_RUNTIME_LOCK_ID,),
-                )
-                row = cur.fetchone()
+            # Render performs rolling deploys, so the previous web process may
+            # legitimately keep the advisory lock for a short handoff window.
+            # Do NOT exit permanently when that happens.  Wait and retry until
+            # the old owner releases the session-level PostgreSQL lock.  This
+            # preserves single-owner execution while preventing the new
+            # deployment from becoming permanently idle.
+            lock_wait_started = time.monotonic()
+            last_wait_log = 0.0
 
-            if not bool(row and row[0]):
-                state["last_error"] = "LOCK_NOT_ACQUIRED"
-                log(
-                    "Another Crypto runtime owns the PostgreSQL "
-                    "advisory lock. This process stays idle."
-                )
-                return
+            while True:
+                with lock_connection.cursor() as cur:
+                    cur.execute(
+                        "SELECT pg_try_advisory_lock(%s)",
+                        (CRYPTO_RUNTIME_LOCK_ID,),
+                    )
+                    row = cur.fetchone()
+
+                if bool(row and row[0]):
+                    break
+
+                state["last_error"] = "WAITING_FOR_RUNTIME_LOCK"
+                waited_seconds = time.monotonic() - lock_wait_started
+
+                # Keep logs useful without flooding Render.
+                if last_wait_log <= 0.0 or (
+                    time.monotonic() - last_wait_log >= 30.0
+                ):
+                    log(
+                        "Another Crypto runtime currently owns the PostgreSQL "
+                        f"advisory lock; waiting for deploy handoff "
+                        f"({waited_seconds:.0f}s)."
+                    )
+                    last_wait_log = time.monotonic()
+
+                time.sleep(5)
 
             state["lock_acquired"] = True
-            log("PostgreSQL advisory lock acquired.")
+            state["last_error"] = None
+            log(
+                "PostgreSQL advisory lock acquired; autonomous scanning active."
+            )
 
             trader = PaperTrader(
                 starting_balance=PAPER_BALANCE
