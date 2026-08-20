@@ -1808,10 +1808,15 @@ def start_crypto_autonomous_runtime():
                 scanner_results=results,
                 strategy=confirmation,
             )
+            diagnostic_reason = str(reason or "V5 strategy did not approve this scanner candidate.").replace("\n", " ").strip()
+            strategy_signal = str(confirmation.get("strategy_signal", "NO TRADE"))
+            quality = str(confirmation.get("quality", "REJECT"))
+
             log(
-                f"Cycle completed | market={market} | signal={signal} | "
-                f"score={score:+.1f} | confidence={confidence:.1f}% | "
-                "status=WAITING FOR V5 CONFIRMATION"
+                f"Cycle completed | market={market} | scanner_signal={signal} | "
+                f"strategy_signal={strategy_signal} | score={score:+.1f} | "
+                f"confidence={confidence:.1f}% | quality={quality} | "
+                f"status=WAITING FOR V5 CONFIRMATION | reason={diagnostic_reason}"
             )
             return
 
