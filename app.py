@@ -103,6 +103,7 @@ except Exception as _health_import_error:
 # PLATFORM CONSTANTS
 # ============================================================
 
+# V5.10 UI PERFORMANCE OPTIMIZATION: read-path only; trading logic unchanged.
 PLATFORM_VERSION = "V5.4-PERFORMANCE-RUNTIME"
 PAPER_ONLY = True
 REAL_EXECUTION_ENABLED = False
@@ -464,9 +465,10 @@ def publish_web_heartbeat() -> None:
 # DAILY PORTFOLIO RISK
 # ============================================================
 
-def update_daily_risk() -> float:
+def update_daily_risk(balance: Optional[float] = None) -> float:
     trader = st.session_state.paper_trader
-    balance = trader.get_balance()
+    if balance is None:
+        balance = trader.get_balance()
     today = utc_now().date()
 
     if st.session_state.day_start_date != today:
@@ -804,7 +806,6 @@ _RUNTIME_STATE_SCHEMA_READY = ensure_runtime_state_schema()
 # CRYPTO ANALYTICS
 # ============================================================
 
-@st.cache_data(ttl=120, show_spinner=False)
 @st.cache_data(ttl=90, show_spinner=False)
 def get_regime_data(symbol: str) -> Dict[str, Any]:
     try:
@@ -1126,10 +1127,11 @@ with c3:
         st.rerun()
 
 with c4:
-    p = st.session_state.paper_trader.get_portfolio_snapshot()
+    quick_positions = st.session_state.paper_trader.get_positions()
+    quick_position_count = len(quick_positions)
     render_html(
         f'<div class="panel" style="min-height:33px;padding:7px 9px;">'
-        f'{badge("PAPER ONLY")}{badge(f"POSITIONS {p.get("open_position_count",0)}/2")}'
+        f'{badge("PAPER ONLY")}{badge(f"POSITIONS {quick_position_count}/2")}'
         f'{badge("1 CRYPTO + 1 METAL")}{badge("REAL EXECUTION OFF")}</div>'
     )
 
@@ -1180,9 +1182,14 @@ def render_quant_chart(symbol: str) -> None:
 # POSITIONS
 # ============================================================
 
-def build_position_rows(trader: PaperTrader) -> list[Dict[str, Any]]:
+def build_position_rows(
+    trader: PaperTrader,
+    positions: Optional[list[Dict[str, Any]]] = None,
+) -> list[Dict[str, Any]]:
     rows = []
-    for position in trader.get_positions():
+    if positions is None:
+        positions = trader.get_positions()
+    for position in positions:
         symbol = position.get("symbol")
         try:
             current = (
@@ -1227,21 +1234,40 @@ def build_position_rows(trader: PaperTrader) -> list[Dict[str, Any]]:
 def live_terminal() -> None:
     trader = st.session_state.paper_trader
     st.session_state.bot_error = None
-    update_daily_risk()
     publish_web_heartbeat()
 
-    # V5.3:
+    # V5.10 UI performance path:
+    # Read PostgreSQL once per data class and reuse the snapshot throughout this
+    # fragment. Trading/runtime logic remains fully independent of this UI path.
+    balance = safe_float(trader.get_balance())
+    positions = trader.get_positions()
+    history = trader.get_trade_history()
+    update_daily_risk(balance)
+
     # UI reads the latest PostgreSQL runtime snapshot only.
     # It never runs scanner / strategy / execution work on rerender.
     sync_crypto_runtime_snapshot()
 
-    balance = safe_float(trader.get_balance())
-    history = trader.get_trade_history()
-    crypto_position = trader.get_position(CRYPTO_SLOT)
-    metals_position = trader.get_position(METALS_SLOT)
+    position_by_slot = {
+        str(position.get("slot")): position
+        for position in positions
+        if isinstance(position, dict)
+    }
+    crypto_position = position_by_slot.get(CRYPTO_SLOT)
+    metals_position = position_by_slot.get(METALS_SLOT)
     total_pnl = sum(safe_float(trade.get("pnl")) for trade in history)
     drawdown = safe_float(st.session_state.current_drawdown)
-    portfolio = trader.get_portfolio_snapshot()
+    portfolio = {
+        "balance": balance,
+        "open_positions": positions,
+        "open_position_count": len(positions),
+        "crypto_position": crypto_position,
+        "metals_position": metals_position,
+        "crypto_slot_available": crypto_position is None,
+        "metals_slot_available": metals_position is None,
+        "max_total_positions": 2,
+        "real_orders_enabled": False,
+    }
 
     render_section("Portfolio Command / Risk / Model State")
     k1, k2, k3, k4, k5, k6 = st.columns(6)
@@ -1421,11 +1447,20 @@ def live_terminal() -> None:
             st.info("Crypto scanner is warming.")
 
         render_section("Correlation Matrix")
-        corr = build_crypto_correlation()
-        if corr is not None and not corr.empty:
-            st.dataframe(corr.round(2), width="stretch")
+        show_correlation = st.toggle(
+            "Load correlation matrix",
+            value=False,
+            key="show_crypto_correlation",
+            help="Loads 11-market candle correlation only when you need it. This keeps the main Crypto UI fast.",
+        )
+        if show_correlation:
+            corr = build_crypto_correlation()
+            if corr is not None and not corr.empty:
+                st.dataframe(corr.round(2), width="stretch")
+            else:
+                st.info("Correlation data is building.")
         else:
-            st.info("Correlation data is building.")
+            st.caption("Correlation is on-demand to keep the terminal responsive.")
 
     elif selected_page == "Metals":
         render_section("Precious Metals Intelligence")
@@ -1456,7 +1491,7 @@ def live_terminal() -> None:
 
     elif selected_page == "Positions":
         render_section("Position Flow / Exposure")
-        rows = build_position_rows(trader)
+        rows = build_position_rows(trader, positions)
         if rows:
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
         else:
@@ -1502,8 +1537,14 @@ def live_terminal() -> None:
         render_section("Performance Analytics")
         statistics = trade_statistics(history)
         st.json(statistics, expanded=False)
-        crypto_history = trader.get_trade_history(asset_class="CRYPTO")
-        metal_history = trader.get_trade_history(asset_class="METAL")
+        crypto_history = [
+            trade for trade in history
+            if str(trade.get("asset_class", "")).upper() == "CRYPTO"
+        ]
+        metal_history = [
+            trade for trade in history
+            if str(trade.get("asset_class", "")).upper() == "METAL"
+        ]
         a1, a2, a3 = st.columns(3)
         with a1:
             render_kpi("Crypto Trades", len(crypto_history), "Closed")
