@@ -1,6 +1,8 @@
-streamlit
-pandas
-numpy
-requests
-ccxt
-psycopg[binary]
+# PRO AI QUANT TERMINAL — bounded production dependencies
+# Purpose: prevent accidental major-version upgrades while keeping security/bugfix releases available.
+streamlit>=1.49,<2.0
+pandas>=2.2,<3.0
+numpy>=2.0,<3.0
+requests>=2.32,<3.0
+ccxt>=4.4,<5.0
+psycopg[binary]>=3.2,<4.0
