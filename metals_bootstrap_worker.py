@@ -1370,7 +1370,15 @@ def run_worker_cycle() -> Dict:
 # MAIN LOOP
 # ============================================================
 
+def _legacy_worker_enabled() -> bool:
+    return os.environ.get("ENABLE_LEGACY_METALS_WORKER", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def main():
+
+    if not _legacy_worker_enabled():
+        print('[LEGACY METALS WORKER] Disabled by default. Current canonical runtime is app.py embedded Metals Auto Bootstrap. Set ENABLE_LEGACY_METALS_WORKER=true only for an intentional isolated legacy deployment.', flush=True)
+        return
 
     global _SHUTDOWN
 
