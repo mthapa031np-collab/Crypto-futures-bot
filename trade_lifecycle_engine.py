@@ -35,7 +35,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 
-ENGINE_VERSION = "V1.1 Trade Lifecycle Engine"
+ENGINE_VERSION = "V1.2 Hold-Time Integrity Lifecycle Engine"
 PAPER_ONLY = True
 REAL_EXECUTION_ENABLED = False
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
@@ -76,7 +76,37 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-MAX_HOLD_HOURS = _env_float("TRADE_MAX_HOLD_HOURS", 24.0, 1.0, 168.0)
+# ============================================================
+# HOLD-TIME INTEGRITY POLICY
+# ============================================================
+# Strategy modules may use a much shorter *target* hold (for example 3h),
+# but that must never be confused with the lifecycle HARD safety ceiling.
+#
+# The previous V1.1 implementation allowed TRADE_MAX_HOLD_HOURS to reduce
+# the hard ceiling all the way to 1h. That made an accidental Render env
+# value such as 3 close a perfectly valid intraday position after ~3h and
+# label it LIFECYCLE_MAX_HOLD_EXIT.
+#
+# V1.2 keeps the environment value for diagnostics, but the hard lifecycle
+# ceiling is deliberately fixed at 24h. Trades can still close earlier via
+# TP, SL, break-even/trailing, stale/no-progress or signal invalidation.
+CONFIGURED_MAX_HOLD_HOURS = _env_float(
+    "TRADE_MAX_HOLD_HOURS",
+    24.0,
+    1.0,
+    168.0,
+)
+HARD_MAX_HOLD_HOURS = 24.0
+MAX_HOLD_HOURS = HARD_MAX_HOLD_HOURS
+
+if abs(CONFIGURED_MAX_HOLD_HOURS - HARD_MAX_HOLD_HOURS) > 1e-9:
+    print(
+        "[LIFECYCLE CONFIG] "
+        f"TRADE_MAX_HOLD_HOURS={CONFIGURED_MAX_HOLD_HOURS:.2f}h "
+        f"does not override the hard safety ceiling; "
+        f"effective max hold={HARD_MAX_HOLD_HOURS:.2f}h.",
+        flush=True,
+    )
 BREAK_EVEN_TRIGGER_R = _env_float("TRADE_BREAK_EVEN_TRIGGER_R", 0.75, 0.10, 10.0)
 BREAK_EVEN_BUFFER_R = _env_float("TRADE_BREAK_EVEN_BUFFER_R", 0.05, 0.0, 2.0)
 TRAILING_TRIGGER_R = _env_float("TRADE_TRAILING_TRIGGER_R", 1.25, 0.20, 20.0)
@@ -463,7 +493,62 @@ def _get_current_price(position: Dict[str, Any]) -> Optional[float]:
     return price if price > 0 else None
 
 
+def _hold_clock(position: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Return a trustworthy UTC hold clock.
+
+    Authority order:
+      1. PaperTrader's current persisted position.opened_at (source of truth)
+      2. lifecycle state's persisted opened_at
+      3. lifecycle first_seen_at fallback
+
+    This prevents stale lifecycle state or a recycled state row from making a
+    newly-opened position appear older than it really is.
+    """
+    now = _utc_now()
+    position_opened = _position_opened_at(position)
+    state_opened = _parse_dt(state.get("opened_at"))
+    first_seen = _parse_dt(state.get("first_seen_at"))
+
+    opened_at = position_opened or state_opened or first_seen
+    source = (
+        "PAPER_POSITION_OPENED_AT" if position_opened is not None
+        else "LIFECYCLE_STATE_OPENED_AT" if state_opened is not None
+        else "LIFECYCLE_FIRST_SEEN" if first_seen is not None
+        else "UNAVAILABLE"
+    )
+
+    if opened_at is None:
+        return {
+            "hours": 0.0,
+            "opened_at": None,
+            "source": source,
+            "valid": False,
+        }
+
+    # A future timestamp should never trigger a close. Treat it as invalid
+    # clock data instead of silently manufacturing an age.
+    delta_seconds = (now - opened_at).total_seconds()
+    if delta_seconds < -60.0:
+        return {
+            "hours": 0.0,
+            "opened_at": opened_at,
+            "source": source,
+            "valid": False,
+            "reason": "opened_at is in the future",
+        }
+
+    return {
+        "hours": max(0.0, delta_seconds / 3600.0),
+        "opened_at": opened_at,
+        "source": source,
+        "valid": True,
+    }
+
+
 def _age_hours(state: Dict[str, Any]) -> float:
+    # Backward-compatible helper used by stale logic. Lifecycle state is safe
+    # here because manage_position refreshes it from the live position clock.
     opened_at = _parse_dt(state.get("opened_at")) or _parse_dt(state.get("first_seen_at"))
     if opened_at is None:
         return 0.0
@@ -613,6 +698,26 @@ def _mark_closed(state: Dict[str, Any], action: str):
 def manage_position(trader, position: Dict[str, Any], strategy_invalidation_evaluator: Optional[Callable] = None) -> Dict[str, Any]:
     key = _position_key(position)
     state = _ensure_state(position)
+
+    # Reconcile lifecycle time with the authoritative PaperTrader position on
+    # every cycle. This is intentionally narrow: only opened_at is refreshed.
+    # Entry/SL/TP/risk geometry remains untouched.
+    authoritative_opened_at = _position_opened_at(position)
+    if authoritative_opened_at is not None:
+        persisted_opened_at = _parse_dt(state.get("opened_at"))
+        if (
+            persisted_opened_at is None
+            or abs((persisted_opened_at - authoritative_opened_at).total_seconds()) > 1.0
+        ):
+            state["opened_at"] = authoritative_opened_at
+            _save_state(state)
+            _record_event(
+                key,
+                position,
+                "HOLD_CLOCK_RECONCILED",
+                "Lifecycle opened_at reconciled to PaperTrader position opened_at.",
+            )
+
     side = _position_side(position) or _side(state.get("side"))
     entry = _positive(position.get("entry_price") or state.get("entry_price"))
     original_stop = _positive(position.get("stop_loss") or state.get("original_stop"))
@@ -633,14 +738,45 @@ def manage_position(trader, position: Dict[str, Any], strategy_invalidation_eval
 
     state = _update_excursions(state, price)
     current_r = _current_r(side, entry, price, risk)
-    hold_hours = _age_hours(state)
 
-    if hold_hours >= MAX_HOLD_HOURS:
+    hold_clock = _hold_clock(position, state)
+    hold_hours = _safe_float(hold_clock.get("hours"))
+
+    # HARD time exit is permitted only from a valid clock and only at the
+    # fixed 24h lifecycle ceiling. Shorter strategy target-hold values are
+    # informational and must not become hard forced exits.
+    if hold_clock.get("valid") and hold_hours >= HARD_MAX_HOLD_HOURS:
         result = _close_position(trader, position, price, "LIFECYCLE_MAX_HOLD_EXIT")
         if result["ok"]:
             _mark_closed(state, "TIME_EXIT")
-        _record_event(key, position, "TIME_EXIT", f"Maximum hold {MAX_HOLD_HOURS:.1f}h reached.", price, current_r, state.get("mfe_r"), state.get("mae_r"), state.get("virtual_stop"), hold_hours)
-        return {"status": "CLOSED" if result["ok"] else "CLOSE_BLOCKED", "action": "TIME_EXIT", "result": result, "hold_hours": hold_hours}
+        _record_event(
+            key,
+            position,
+            "TIME_EXIT",
+            (
+                f"Hard maximum hold {HARD_MAX_HOLD_HOURS:.1f}h reached "
+                f"using {hold_clock.get('source')}."
+            ),
+            price,
+            current_r,
+            state.get("mfe_r"),
+            state.get("mae_r"),
+            state.get("virtual_stop"),
+            hold_hours,
+        )
+        return {
+            "status": "CLOSED" if result["ok"] else "CLOSE_BLOCKED",
+            "action": "TIME_EXIT",
+            "result": result,
+            "hold_hours": hold_hours,
+            "max_hold_hours": HARD_MAX_HOLD_HOURS,
+            "hold_clock_source": hold_clock.get("source"),
+            "opened_at": (
+                hold_clock.get("opened_at").isoformat()
+                if hold_clock.get("opened_at") is not None
+                else None
+            ),
+        }
 
     invalidation = _strategy_exit(strategy_invalidation_evaluator, position, price)
     if invalidation.get("exit"):
@@ -695,7 +831,10 @@ def manage_position(trader, position: Dict[str, Any], strategy_invalidation_eval
         "break_even_active": be,
         "trailing_active": trailing,
         "hold_hours": hold_hours,
-        "max_hold_hours": MAX_HOLD_HOURS,
+        "max_hold_hours": HARD_MAX_HOLD_HOURS,
+        "configured_max_hold_hours": CONFIGURED_MAX_HOLD_HOURS,
+        "hold_clock_source": hold_clock.get("source"),
+        "hold_clock_valid": bool(hold_clock.get("valid")),
         "base_tp_sl_checked": base.get("checked"),
         "paper_only": True,
     }
@@ -790,7 +929,10 @@ def trade_lifecycle_health(trader=None) -> Dict[str, Any]:
         "engine": ENGINE_VERSION,
         "paper_only": True,
         "real_execution_locked": True,
-        "max_hold_hours": MAX_HOLD_HOURS,
+        "max_hold_hours": HARD_MAX_HOLD_HOURS,
+        "configured_max_hold_hours": CONFIGURED_MAX_HOLD_HOURS,
+        "hard_max_hold_locked": True,
+        "hold_clock_authority": "PaperTrader position.opened_at",
         "break_even_trigger_r": BREAK_EVEN_TRIGGER_R,
         "break_even_buffer_r": BREAK_EVEN_BUFFER_R,
         "trailing_trigger_r": TRAILING_TRIGGER_R,
