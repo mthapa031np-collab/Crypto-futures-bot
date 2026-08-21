@@ -104,7 +104,7 @@ except Exception as _health_import_error:
 # ============================================================
 
 # V5.10 UI PERFORMANCE OPTIMIZATION: read-path only; trading logic unchanged.
-PLATFORM_VERSION = "V5.4-PERFORMANCE-RUNTIME"
+PLATFORM_VERSION = "V5.11-RUNTIME-UI-HEALTH"
 PAPER_ONLY = True
 REAL_EXECUTION_ENABLED = False
 METALS_SCAN_SECONDS = 300
@@ -335,6 +335,7 @@ def init_state() -> None:
         "crypto_confidence": 0.0,
         "crypto_reason": "",
         "crypto_last_scan_at": None,
+        "crypto_runtime_updated_at": None,
         "metals_status": "STARTING",
         "metals_scanner_results": [],
         "metals_best_setup": None,
@@ -790,6 +791,11 @@ def sync_crypto_runtime_snapshot() -> None:
 
     if isinstance(scanner_results, list):
         st.session_state.crypto_scanner_results = scanner_results
+
+    st.session_state.crypto_runtime_updated_at = snapshot.get(
+        "updated_at",
+        snapshot.get("_updated_at", st.session_state.crypto_runtime_updated_at),
+    )
 
     strategy = snapshot.get("strategy")
 
@@ -1401,7 +1407,14 @@ def live_terminal() -> None:
             ]
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, height=275)
         else:
-            st.info("Signal matrix warming up.")
+            runtime_status = str(st.session_state.crypto_status or "STARTING")
+            if runtime_status not in {"STARTING", "WARMING", ""}:
+                st.info(
+                    f"Signal matrix has no cached rows yet · runtime={runtime_status}. "
+                    "Autonomous trading is not blocked by this display state."
+                )
+            else:
+                st.info("Signal matrix warming up.")
 
     elif selected_page == "Crypto":
         render_section("Crypto Intelligence")
@@ -1444,7 +1457,14 @@ def live_terminal() -> None:
         if st.session_state.crypto_scanner_results:
             st.dataframe(pd.DataFrame(st.session_state.crypto_scanner_results), width="stretch", hide_index=True)
         else:
-            st.info("Crypto scanner is warming.")
+            runtime_status = str(st.session_state.crypto_status or "STARTING")
+            if runtime_status not in {"STARTING", "WARMING", ""}:
+                st.info(
+                    f"Crypto scanner runtime: {runtime_status}. "
+                    "No cached scanner rows are available yet; trading runtime remains independent of this UI table."
+                )
+            else:
+                st.info("Crypto scanner is warming.")
 
         render_section("Correlation Matrix")
         show_correlation = st.toggle(
@@ -1683,19 +1703,46 @@ def start_crypto_autonomous_runtime():
         strategy: Optional[Dict[str, Any]] = None,
         execution: Optional[Dict[str, Any]] = None,
     ) -> None:
+        # V5.11: status-only updates (PAUSED / SCANNING / POSITION OPEN) must
+        # not erase the last good scanner matrix.  The previous implementation
+        # wrote [] whenever scanner_results was omitted, which made a healthy
+        # background scanner look like it was permanently "warming" in a new
+        # Streamlit session.  Preserve the durable PostgreSQL snapshot instead.
+        previous = read_runtime_state("crypto_runtime", {})
+        previous_results = previous.get("scanner_results", []) if isinstance(previous, dict) else []
+        previous_strategy = previous.get("strategy", {}) if isinstance(previous, dict) else {}
+        previous_execution = previous.get("execution", {}) if isinstance(previous, dict) else {}
+
+        durable_results = (
+            scanner_results
+            if isinstance(scanner_results, list)
+            else previous_results if isinstance(previous_results, list) else []
+        )
+        durable_strategy = (
+            strategy
+            if isinstance(strategy, dict)
+            else previous_strategy if isinstance(previous_strategy, dict) else {}
+        )
+        durable_execution = (
+            execution
+            if isinstance(execution, dict)
+            else previous_execution if isinstance(previous_execution, dict) else {}
+        )
+
         write_runtime_state(
             "crypto_runtime",
             {
-                "runtime_version": "V5.7",
+                "runtime_version": "V5.11",
                 "status": status,
                 "market": market,
                 "signal": signal,
                 "score": safe_float(score),
                 "confidence": safe_float(confidence),
                 "reason": str(reason or ""),
-                "scanner_results": scanner_results or [],
-                "strategy": strategy or {},
-                "execution": execution or {},
+                "scanner_results": durable_results,
+                "strategy": durable_strategy,
+                "execution": durable_execution,
+                "scanner_rows": len(durable_results),
                 "paper_only": True,
                 "real_execution": False,
                 "updated_at": utc_now().isoformat(),
