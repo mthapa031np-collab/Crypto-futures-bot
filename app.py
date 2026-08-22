@@ -40,7 +40,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="PRO AI QUANT TERMINAL V5",
+    page_title="PRO AI QUANT TERMINAL V6",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -104,7 +104,7 @@ except Exception as _health_import_error:
 # ============================================================
 
 # V5.10 UI PERFORMANCE OPTIMIZATION: read-path only; trading logic unchanged.
-PLATFORM_VERSION = "V5.13-COMPACT-PRO-UI"
+PLATFORM_VERSION = "V6.0-UI-SHELL"
 PAPER_ONLY = True
 REAL_EXECUTION_ENABLED = False
 METALS_SCAN_SECONDS = 300
@@ -142,29 +142,31 @@ def render_html(value: str) -> None:
 # ============================================================
 
 def inject_v5_css() -> None:
-    """Compact professional UI skin. Presentation-only; trading logic unchanged."""
+    """V6 command-center shell. Presentation-only; trading logic unchanged."""
     render_html("""
     <style>
-    :root{--bg0:#05080c;--line:#1d2933;--line2:#2b3a46;--text:#e7edf2;--green:#43d59d;--red:#ef6f7d;--amber:#e6b84d;--blue:#72a7ff;}
+    :root{--bg:#05080d;--line:#1c2a37;--line2:#25384a;--text:#edf5f7;--cyan:#36e3ef;--green:#39dfa6;--red:#ff6476;--amber:#f0c35a;--blue:#6aa9ff;}
     html,body,[class*="css"]{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
-    .stApp{background:radial-gradient(circle at 50% -12%,rgba(54,88,122,.14),transparent 26%),var(--bg0);color:var(--text);}
-    .block-container{max-width:1920px;padding-top:.35rem;padding-bottom:2rem;padding-left:.55rem;padding-right:.55rem;}
-    #MainMenu,footer{visibility:hidden;}::-webkit-scrollbar{width:6px;height:6px;}::-webkit-scrollbar-track{background:#070b10;}::-webkit-scrollbar-thumb{background:#283744;border-radius:10px;}
-    .q-header{border:1px solid var(--line2);background:linear-gradient(180deg,#0d151d,#080c11);padding:8px 11px;margin-bottom:4px;box-shadow:0 8px 24px rgba(0,0,0,.28);}
-    .q-header-row{display:flex;justify-content:space-between;align-items:center;gap:10px}.q-brand{display:flex;align-items:center;gap:9px}.q-mark{width:14px;height:14px;background:var(--amber);box-shadow:0 0 14px rgba(229,184,79,.24)}
-    .q-title{font-size:12.5px;font-weight:850;letter-spacing:1.3px;color:#f0f4f7}.q-sub{font-size:6.8px;letter-spacing:1.05px;color:#687887;margin-top:2px}.q-status{text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.q-online{color:var(--green);font-size:8px;font-weight:800}.q-clock{color:#8d9ba7;font-size:7px;margin-top:1px}
-    .q-strip{border:1px solid #18232c;background:#070b10;padding:4px 8px;margin-bottom:5px;overflow-x:auto;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:7.2px;letter-spacing:.25px;color:#85939f}.q-strip span{margin-right:15px}.pos{color:var(--green)!important}.neg{color:var(--red)!important}.warn{color:var(--amber)!important}.info{color:var(--blue)!important}
-    .section-title{margin:7px 0 4px 1px;color:#7f8f9c;font-size:7px;letter-spacing:1.05px;text-transform:uppercase;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:800}
-    .panel{border:1px solid var(--line);background:linear-gradient(180deg,#0b1218,#070b10);padding:8px;min-height:70px}.panel-title{color:#7a8a98;font-size:6.7px;letter-spacing:.9px;text-transform:uppercase;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-bottom:5px}
-    .kpi{border:1px solid var(--line);background:#080d12;padding:6px 8px;min-height:57px}.kpi-label{color:#697987;font-size:6.2px;letter-spacing:.8px;text-transform:uppercase;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.kpi-value{color:#edf2f5;font-size:14px;font-weight:850;margin-top:3px;line-height:1.05;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.kpi-sub{color:#62717d;font-size:6.5px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .badge{display:inline-block;padding:2px 5px;margin:0 3px 3px 0;border:1px solid #2a3742;background:#0a1015;color:#8f9ca7;font-size:6.7px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.badge-green{color:var(--green);border-color:#285d4a}.badge-red{color:var(--red);border-color:#693a41}.badge-amber{color:var(--amber);border-color:#6c5728}.badge-blue{color:var(--blue);border-color:#365070}
-    div[data-testid="stMetric"]{border:1px solid var(--line);background:#080d12;padding:6px 8px;border-radius:0}div[data-testid="stMetricLabel"]{color:#71818f;font-size:8px}div[data-testid="stMetricValue"]{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:1rem}div[data-testid="stDataFrame"]{border:1px solid var(--line)}div[data-baseweb="select"]>div{background:#080d12;border-color:#24313b;min-height:30px}
-    .stButton>button{width:100%;min-height:30px;border-radius:0;border:1px solid #293742;background:linear-gradient(180deg,#111922,#0a1016);color:#cbd4db;font-size:8px;padding:.25rem .45rem}.stButton>button:hover{border-color:#4a6277;color:white}div[role="radiogroup"]{background:#070b10;border:1px solid #1e2932;padding:2px 5px;border-radius:0}div[role="radiogroup"] label{font-size:8px!important}
-    .compact-title{font-size:8px;color:#8b99a5;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px;font-weight:800}.activity-row{display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid #17222b;padding:5px 0;font-size:7.5px;color:#a7b3bd}.activity-row:last-child{border-bottom:none}.activity-time{color:#647581;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.signal-buy{color:var(--green);font-weight:800}.signal-sell{color:var(--red);font-weight:800}.signal-flat{color:#8b98a3;font-weight:800}
-    @media(max-width:1050px){.block-container{padding-left:.35rem;padding-right:.35rem}.q-title{font-size:11px}.q-sub{display:none}.kpi-value{font-size:12px}.q-strip{font-size:6.6px}}
+    .stApp{background:radial-gradient(circle at 50% -5%,rgba(21,78,104,.19),transparent 30%),linear-gradient(180deg,#05090e 0%,#030609 100%);color:var(--text);}
+    .block-container{max-width:1920px;padding-top:.3rem;padding-bottom:2rem;padding-left:.55rem;padding-right:.55rem;}
+    #MainMenu,footer{visibility:hidden;}
+    ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:#071019}::-webkit-scrollbar-thumb{background:#294154;border-radius:99px}
+    .q-header{border:1px solid var(--line2);border-radius:14px;background:linear-gradient(180deg,rgba(14,24,34,.96),rgba(7,12,18,.96));padding:10px 13px;margin-bottom:6px;box-shadow:0 12px 32px rgba(0,0,0,.32),inset 0 1px 0 rgba(255,255,255,.025);}
+    .q-header-row{display:flex;justify-content:space-between;align-items:center;gap:10px}.q-brand{display:flex;align-items:center;gap:10px}.q-mark{width:18px;height:18px;border:2px solid var(--cyan);border-radius:5px;box-shadow:0 0 18px rgba(54,227,239,.28);position:relative}.q-mark:after{content:"";position:absolute;width:6px;height:6px;background:var(--cyan);border-radius:2px;left:4px;top:4px}.q-title{font-size:13px;font-weight:900;letter-spacing:1.5px;color:#f2fbfd}.q-sub{font-size:6.7px;letter-spacing:1.05px;color:#728594;margin-top:2px}.q-status{text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.q-online{color:var(--green);font-size:8px;font-weight:900}.q-clock{color:#8495a3;font-size:7px;margin-top:1px}
+    .q-strip{border:1px solid #182733;border-radius:11px;background:#071019;padding:5px 10px;margin-bottom:7px;overflow-x:auto;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:7.2px;color:#8195a4}.q-strip span{margin-right:16px}.pos{color:var(--green)!important}.neg{color:var(--red)!important}.warn{color:var(--amber)!important}.info{color:var(--blue)!important}
+    .section-title{margin:8px 0 5px 2px;color:#90a5b5;font-size:7px;letter-spacing:1.35px;text-transform:uppercase;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:900}
+    .panel{border:1px solid var(--line);border-radius:13px;background:linear-gradient(180deg,rgba(13,21,30,.98),rgba(7,12,18,.98));padding:9px;min-height:70px;box-shadow:inset 0 1px 0 rgba(255,255,255,.02)}.panel-title{color:#7f93a3;font-size:6.7px;letter-spacing:1.05px;text-transform:uppercase;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-bottom:6px}
+    .kpi{border:1px solid var(--line);border-radius:12px;background:linear-gradient(180deg,#0d151e,#080d13);padding:8px 10px;min-height:61px;box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.kpi-label{color:#758999;font-size:6.2px;letter-spacing:.9px;text-transform:uppercase;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.kpi-value{color:#f1f8fa;font-size:14px;font-weight:900;margin-top:3px;line-height:1.05;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.kpi-sub{color:#637684;font-size:6.5px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .badge{display:inline-block;padding:2px 6px;margin:0 3px 3px 0;border:1px solid #2a4050;border-radius:999px;background:#091119;color:#93a5b2;font-size:6.7px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.badge-green{color:var(--green);border-color:#285e4b}.badge-red{color:var(--red);border-color:#6b3943}.badge-amber{color:var(--amber);border-color:#67552b}.badge-blue{color:var(--blue);border-color:#33547a}
+    div[data-testid="stMetric"]{border:1px solid var(--line);background:#091119;padding:7px 9px;border-radius:12px}div[data-testid="stMetricLabel"]{color:#718695;font-size:8px}div[data-testid="stMetricValue"]{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:1rem}div[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:12px;overflow:hidden}div[data-baseweb="select"]>div{background:#081019;border-color:#243847;min-height:31px;border-radius:9px}
+    .stButton>button{width:100%;min-height:31px;border-radius:10px;border:1px solid #2b4050;background:linear-gradient(180deg,#111c26,#0a1118);color:#cbd8df;font-size:8px;padding:.25rem .48rem}.stButton>button:hover{border-color:#3ba6b0;color:white;box-shadow:0 0 0 1px rgba(54,227,239,.08)}
+    div[role="radiogroup"]{background:#071019;border:1px solid #1d2c38;padding:4px 5px;border-radius:12px;gap:3px}div[role="radiogroup"] label{font-size:8px!important;border-radius:8px;padding:3px 7px!important}div[role="radiogroup"] label:has(input:checked){background:#102532!important;color:#dffcff!important;box-shadow:inset 0 0 0 1px #1c5960}
+    .compact-title{font-size:7px;color:#8fa3b2;letter-spacing:1.1px;text-transform:uppercase;margin-bottom:5px;font-weight:900}.activity-row{display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid #172833;padding:5px 0;font-size:7.5px;color:#afbdc5}.activity-row:last-child{border-bottom:none}.activity-time{color:#667b89;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.signal-buy{color:var(--green);font-weight:900}.signal-sell{color:var(--red);font-weight:900}.signal-flat{color:#91a0aa;font-weight:900}
+    .v6-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:5px}.v6-heat{border:1px solid #213542;border-radius:8px;background:#09121a;padding:6px 7px;min-height:37px}.v6-heat.buy{border-color:#225d48;background:linear-gradient(180deg,rgba(30,94,70,.27),#09121a)}.v6-heat.sell{border-color:#653641;background:linear-gradient(180deg,rgba(101,43,55,.24),#09121a)}.v6-heat.flat{opacity:.68}.v6-sym{font-size:7px;font-weight:900;color:#d9e8ed}.v6-score{font-size:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:3px}.v6-card-title{font-size:7px;color:#87a0af;letter-spacing:1px;text-transform:uppercase;font-weight:900}.v6-card-big{font-size:17px;font-weight:900;color:#ecf8fa;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:4px}.v6-card-sub{font-size:6.8px;color:#6f8493;margin-top:3px}.v6-divider{height:1px;background:#172733;margin:7px 0}.v6-foot{border:1px solid #192a36;border-radius:10px;background:#071019;padding:5px 8px;font-size:6.6px;color:#69808f;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;display:flex;gap:14px;flex-wrap:wrap}
+    iframe{border-radius:12px!important;overflow:hidden!important}
+    @media(max-width:1050px){.block-container{padding-left:.35rem;padding-right:.35rem}.q-title{font-size:11px}.q-sub{display:none}.kpi-value{font-size:12px}.q-strip{font-size:6.6px}.v6-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
     </style>
     """)
-
 inject_v5_css()
 
 # ============================================================
@@ -910,8 +912,8 @@ def render_terminal_header() -> None:
                 <div class="q-brand">
                     <div class="q-mark"></div>
                     <div>
-                        <div class="q-title">PRO AI · QUANT TERMINAL V5</div>
-                        <div class="q-sub">MULTI-ASSET / QUANT INTELLIGENCE / PORTFOLIO RISK / AUTONOMOUS PAPER ENGINE</div>
+                        <div class="q-title">PRO AI · QUANT TERMINAL V6</div>
+                        <div class="q-sub">COMMAND CENTER / CRYPTO + METALS / RISK INTELLIGENCE / AUTONOMOUS PAPER ENGINE</div>
                     </div>
                 </div>
                 <div class="q-status">
@@ -945,11 +947,23 @@ render_market_strip()
 # NAVIGATION + QUICK CONTROLS
 # ============================================================
 
+V6_NAV_LABELS = {
+    "Command": "Dashboard",
+    "Crypto": "Crypto",
+    "Metals": "Metals",
+    "Positions": "Portfolio",
+    "Scanner": "Scanner",
+    "Risk": "Risk",
+    "Analytics": "Analytics",
+    "Settings": "Settings",
+}
+
 selected_page = st.radio(
     "Navigation",
     NAV_ITEMS,
     key="selected_asset_class",
     horizontal=True,
+    format_func=lambda page: V6_NAV_LABELS.get(page, page),
     label_visibility="collapsed",
 )
 
@@ -1083,6 +1097,38 @@ def build_position_rows(
     return rows
 
 # ============================================================
+# V6 UI HELPERS — real data only
+# ============================================================
+
+def render_v6_scanner_heatmap(results: list[Dict[str, Any]]) -> None:
+    if not results:
+        render_html('<div class="panel">Scanner state warming.</div>')
+        return
+    tiles = []
+    for item in results[:30]:
+        symbol = escape(str(item.get("symbol", "—")).replace("USDT", ""))
+        signal = str(item.get("signal", "NO TRADE")).upper()
+        score = safe_float(item.get("score"))
+        css = "buy" if signal == "BUY" else "sell" if signal == "SELL" else "flat"
+        score_cls = "signal-buy" if score > 0 else "signal-sell" if score < 0 else "signal-flat"
+        tiles.append(
+            f'<div class="v6-heat {css}"><div class="v6-sym">{symbol}</div>'
+            f'<div class="v6-score {score_cls}">{score:+.1f} · {escape(signal)}</div></div>'
+        )
+    render_html('<div class="v6-grid">' + ''.join(tiles) + '</div>')
+
+
+def build_equity_curve(history: list[Dict[str, Any]]) -> pd.DataFrame:
+    if not history:
+        return pd.DataFrame()
+    running = float(PAPER_BALANCE)
+    rows = []
+    for idx, trade in enumerate(history, start=1):
+        running += safe_float(trade.get("pnl"))
+        rows.append({"Trade": idx, "Equity": running})
+    return pd.DataFrame(rows).set_index("Trade")
+
+# ============================================================
 # LIVE UI FRAGMENT
 # ============================================================
 
@@ -1124,87 +1170,171 @@ def live_terminal() -> None:
         render_kpi("AI Signal", st.session_state.crypto_signal, f"{safe_float(st.session_state.crypto_confidence):.1f}%")
 
     if selected_page == "Command":
-        render_section("Compact Professional Command")
-        left, center, right = st.columns([1.75, .85, .8])
+        render_section("V6 Command Center")
+        intelligence = scanner_intelligence(st.session_state.crypto_scanner_results)
+        breadth = intelligence.get("breadth", {}) if isinstance(intelligence, dict) else {}
+        bullish = safe_float(breadth.get("bullish_pct"))
+        bearish = safe_float(breadth.get("bearish_pct"))
+        wins = sum(1 for t in history if safe_float(t.get("pnl")) > 0)
+        losses = sum(1 for t in history if safe_float(t.get("pnl")) < 0)
+        closed = len(history)
+        win_rate = (wins / closed * 100.0) if closed else 0.0
 
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            render_kpi("Portfolio Value", f"${balance:,.2f}", f"Realized {total_pnl:+,.2f}")
+        with k2:
+            render_kpi("Open Exposure", f"{open_count}/2", "1 Crypto + 1 Metal")
+        with k3:
+            render_kpi("Win Rate", f"{win_rate:.1f}%", f"{wins}W / {losses}L")
+        with k4:
+            render_kpi("Risk State", f"{drawdown:.2f}% DD", "PAPER · REAL OFF")
+
+        left, middle, right = st.columns([1.65, .7, .75])
         with left:
-            row1, row2 = st.columns([1.55, .9])
-            with row1:
+            top_a, top_b = st.columns([1.4, .85])
+            with top_a:
                 chart_symbol = st.selectbox("Primary Market", SCAN_MARKETS, key="chart_pair", label_visibility="collapsed")
-            with row2:
+            with top_b:
                 ticker = get_cached_ticker(chart_symbol)
                 if ticker:
                     change = safe_float(ticker.get("change_pct"))
-                    st.caption(f"{chart_symbol}  ${safe_float(ticker.get('last')):,.4f}  {change:+.2f}%")
+                    last = safe_float(ticker.get("last"))
+                    change_class = "pos" if change >= 0 else "neg"
+                    render_html(
+                        f'<div class="panel" style="min-height:31px;padding:6px 8px;">'
+                        f'<b>{escape(chart_symbol)}</b> &nbsp; ${last:,.4f} &nbsp; '
+                        f'<span class="{change_class}">{change:+.2f}%</span></div>'
+                    )
                 else:
-                    st.caption(chart_symbol)
+                    render_html(f'<div class="panel" style="min-height:31px;padding:6px 8px;">{escape(chart_symbol)}</div>')
             render_quant_chart(chart_symbol)
 
-        with center:
-            render_html('<div class="compact-title">Recent Activity</div>')
-            recent = list(history[-5:]) if history else []
-            if recent:
-                activity = []
-                for trade in reversed(recent):
-                    symbol = escape(trade.get("symbol", "—"))
-                    reason = escape(trade.get("reason", "CLOSED"))
-                    pnl = safe_float(trade.get("pnl"))
-                    cls = "signal-buy" if pnl >= 0 else "signal-sell"
-                    activity.append(f'<div class="activity-row"><span>{symbol}<br><span class="{cls}">{pnl:+.2f}</span></span><span class="activity-time">{reason}</span></div>')
-                render_html('<div class="panel">' + ''.join(activity) + '</div>')
-            else:
-                render_html('<div class="panel">No closed activity yet.</div>')
+        with middle:
+            render_html('<div class="compact-title">Market Regime</div>')
+            regime = get_regime_data(chart_symbol)
+            regime_html = (
+                '<div class="panel">'
+                f'<div class="v6-card-title">{escape(chart_symbol)} regime</div>'
+                f'<div class="v6-card-big">{escape(regime.get("regime", "UNKNOWN"))}</div>'
+                f'<div class="v6-card-sub">Trend {escape(regime.get("trend", "UNKNOWN"))}</div>'
+                '<div class="v6-divider"></div>'
+                f'<div class="activity-row"><span>ATR</span><span>{safe_float(regime.get("atr_pct")):.2f}%</span></div>'
+                f'<div class="activity-row"><span>Momentum</span><span>{safe_float(regime.get("momentum")):+.2f}</span></div>'
+                f'<div class="activity-row"><span>Bull breadth</span><span>{bullish:.1f}%</span></div>'
+                f'<div class="activity-row"><span>Bear breadth</span><span>{bearish:.1f}%</span></div>'
+                '</div>'
+            )
+            render_html(regime_html)
 
-            render_html('<div class="compact-title" style="margin-top:7px;">Decision Core</div>')
+            render_html('<div class="compact-title" style="margin-top:8px;">AI Decision Core</div>')
             reason = escape(st.session_state.crypto_reason or "Awaiting current scanner decision.")
-            render_html(f"""<div class="panel">{badge(st.session_state.crypto_status)} {badge(st.session_state.crypto_signal)}<div style="margin-top:6px;font-size:8px;color:#8c99a4;line-height:1.45;">{reason}</div></div>""")
+            decision_html = (
+                '<div class="panel">'
+                f'{badge(st.session_state.crypto_status)} {badge(st.session_state.crypto_signal)}'
+                f'<div class="v6-card-big">{safe_float(st.session_state.crypto_confidence):.1f}%</div>'
+                '<div class="v6-card-sub">MTF confidence</div>'
+                '<div class="v6-divider"></div>'
+                f'<div style="font-size:7px;color:#8699a7;line-height:1.5;">{reason}</div>'
+                '</div>'
+            )
+            render_html(decision_html)
 
         with right:
-            render_html('<div class="compact-title">Active Positions</div>')
+            render_html('<div class="compact-title">Risk Metrics</div>')
+            remaining = max(0.0, MAX_DAILY_LOSS_PCT - drawdown)
+            risk_html = (
+                '<div class="panel">'
+                f'<div class="activity-row"><span>Daily Drawdown</span><span>{drawdown:.2f}%</span></div>'
+                f'<div class="activity-row"><span>Loss Budget Left</span><span>{remaining:.2f}%</span></div>'
+                f'<div class="activity-row"><span>Open Slots</span><span>{open_count}/2</span></div>'
+                f'<div class="activity-row"><span>Markets</span><span>{len(st.session_state.crypto_scanner_results)}/{len(SCAN_MARKETS)}</span></div>'
+                '<div class="activity-row"><span>Execution</span><span class="signal-flat">PAPER ONLY</span></div>'
+                '</div>'
+            )
+            render_html(risk_html)
+
+            render_html('<div class="compact-title" style="margin-top:8px;">Active Positions</div>')
             if positions:
                 pos_rows = []
                 for p in positions:
                     sym = escape(p.get("symbol", "—"))
                     side = escape(p.get("side", "—"))
                     side_cls = "signal-buy" if str(side).upper() == "LONG" else "signal-sell"
-                    pos_rows.append(f'<div class="activity-row"><span>{sym}<br><span class="{side_cls}">{side}</span></span><span class="activity-time">OPEN</span></div>')
+                    pos_rows.append(f'<div class="activity-row"><span>{sym}</span><span class="{side_cls}">{side}</span></div>')
                 render_html('<div class="panel">' + ''.join(pos_rows) + '</div>')
             else:
                 render_html('<div class="panel">Portfolio flat.</div>')
 
-            render_html('<div class="compact-title" style="margin-top:7px;">Risk Overview</div>')
-            remaining = max(0.0, MAX_DAILY_LOSS_PCT - drawdown)
-            render_html(f"""<div class="panel"><div class="activity-row"><span>Daily Drawdown</span><span>{drawdown:.2f}%</span></div><div class="activity-row"><span>Loss Budget Left</span><span>{remaining:.2f}%</span></div><div class="activity-row"><span>Open Slots</span><span>{open_count}/2</span></div><div class="activity-row"><span>Execution</span><span class="signal-flat">PAPER</span></div></div>""")
-
-        render_section("Scanner Signals / Portfolio Allocation / Performance")
-        scan_col, alloc_col, perf_col = st.columns([1.5, .75, .75])
-        with scan_col:
-            results = st.session_state.crypto_scanner_results
-            if results:
-                sig_rows = []
-                for item in results:
-                    signal = str(item.get("signal", "NO TRADE"))
-                    if signal == "NO TRADE":
-                        continue
-                    sig_rows.append({"Symbol": item.get("symbol"), "Signal": signal, "Score": item.get("score"), "Price": item.get("price"), "Action": "CANDIDATE"})
-                if sig_rows:
-                    st.dataframe(pd.DataFrame(sig_rows[:10]), width="stretch", hide_index=True, height=245)
-                else:
-                    st.info("No active scanner signals. Quality filters are holding.")
+            render_html('<div class="compact-title" style="margin-top:8px;">Recent Activity</div>')
+            recent = list(history[-4:]) if history else []
+            if recent:
+                activity = []
+                for trade in reversed(recent):
+                    symbol = escape(trade.get("symbol", "—"))
+                    pnl = safe_float(trade.get("pnl"))
+                    pnl_cls = "signal-buy" if pnl >= 0 else "signal-sell"
+                    activity.append(f'<div class="activity-row"><span>{symbol}</span><span class="{pnl_cls}">{pnl:+.2f}</span></div>')
+                render_html('<div class="panel">' + ''.join(activity) + '</div>')
             else:
-                st.info("Scanner state warming.")
+                render_html('<div class="panel">No closed activity yet.</div>')
 
-        with alloc_col:
-            crypto_count = 1 if crypto_position else 0
-            metal_count = 1 if metals_position else 0
-            render_html(f"""<div class="panel" style="min-height:245px;"><div class="panel-title">PORTFOLIO ALLOCATION</div><div class="activity-row"><span>Crypto Slot</span><span>{'OPEN' if crypto_count else 'FREE'}</span></div><div class="activity-row"><span>Metals Slot</span><span>{'OPEN' if metal_count else 'FREE'}</span></div><div class="activity-row"><span>Paper Equity</span><span>${balance:,.0f}</span></div><div class="activity-row"><span>Realized PnL</span><span>{total_pnl:+,.0f}</span></div><div style="margin-top:18px;color:#687987;font-size:8px;line-height:1.45;">Two isolated asset-class slots. Real execution remains hard-disabled.</div></div>""")
+        render_section("Top-30 Market Heatmap")
+        render_v6_scanner_heatmap(st.session_state.crypto_scanner_results)
+
+        flow_col, perf_col, signal_col = st.columns([1, 1, 1])
+        with flow_col:
+            render_html('<div class="compact-title">Portfolio Allocation</div>')
+            crypto_slot_text = "OPEN" if crypto_position else "FREE"
+            metals_slot_text = "OPEN" if metals_position else "FREE"
+            allocation_html = (
+                '<div class="panel" style="min-height:215px;">'
+                f'<div class="activity-row"><span>Crypto Slot</span><span>{crypto_slot_text}</span></div>'
+                f'<div class="activity-row"><span>Metals Slot</span><span>{metals_slot_text}</span></div>'
+                f'<div class="activity-row"><span>Paper Equity</span><span>${balance:,.0f}</span></div>'
+                f'<div class="activity-row"><span>Realized PnL</span><span>{total_pnl:+,.0f}</span></div>'
+                '<div class="activity-row"><span>Mode</span><span class="signal-flat">PAPER LOCKED</span></div>'
+                '<div class="v6-card-sub" style="margin-top:15px;">Two isolated asset-class slots. Real orders remain hard-disabled.</div>'
+                '</div>'
+            )
+            render_html(allocation_html)
 
         with perf_col:
-            wins = sum(1 for t in history if safe_float(t.get("pnl")) > 0)
-            losses = sum(1 for t in history if safe_float(t.get("pnl")) < 0)
-            closed = len(history)
-            win_rate = (wins / closed * 100.0) if closed else 0.0
-            render_html(f"""<div class="panel" style="min-height:245px;"><div class="panel-title">PERFORMANCE</div><div class="activity-row"><span>Closed Trades</span><span>{closed}</span></div><div class="activity-row"><span>Wins / Losses</span><span>{wins} / {losses}</span></div><div class="activity-row"><span>Win Rate</span><span>{win_rate:.1f}%</span></div><div class="activity-row"><span>Realized PnL</span><span>{total_pnl:+,.2f}</span></div><div class="activity-row"><span>Daily DD</span><span>{drawdown:.2f}%</span></div></div>""")
+            render_html('<div class="compact-title">Equity Performance</div>')
+            curve = build_equity_curve(history)
+            if not curve.empty:
+                st.line_chart(curve, height=215, use_container_width=True)
+            else:
+                render_html('<div class="panel" style="min-height:215px;">Equity curve will appear after closed paper trades.</div>')
+
+        with signal_col:
+            render_html('<div class="compact-title">Scanner Signals</div>')
+            candidates = []
+            for item in st.session_state.crypto_scanner_results:
+                signal = str(item.get("signal", "NO TRADE"))
+                if signal in {"BUY", "SELL"}:
+                    candidates.append((abs(safe_float(item.get("score"))), item))
+            candidates.sort(key=lambda pair: pair[0], reverse=True)
+            if candidates:
+                rows = []
+                for _, item in candidates[:8]:
+                    sig = str(item.get("signal"))
+                    sig_cls = "signal-buy" if sig == "BUY" else "signal-sell"
+                    rows.append(
+                        f'<div class="activity-row"><span>{escape(item.get("symbol", "—"))}</span>'
+                        f'<span class="{sig_cls}">{escape(sig)} {safe_float(item.get("score")):+.1f}</span></div>'
+                    )
+                render_html('<div class="panel" style="min-height:215px;">' + ''.join(rows) + '</div>')
+            else:
+                render_html('<div class="panel" style="min-height:215px;">No qualified scanner candidates right now.</div>')
+
+        render_html(
+            '<div class="v6-foot">'
+            '<span>● CRYPTO AUTONOMOUS</span><span>● LIFECYCLE</span><span>● METALS BOOTSTRAP</span>'
+            '<span>TOP-30 UNIVERSE</span><span>REAL EXECUTION OFF</span>'
+            f'<span>{utc_now().strftime("%H:%M:%S")} UTC</span>'
+            '</div>'
+        )
 
     elif selected_page == "Crypto":
         render_section("Crypto Intelligence")
