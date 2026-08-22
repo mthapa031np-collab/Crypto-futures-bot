@@ -104,7 +104,7 @@ except Exception as _health_import_error:
 # ============================================================
 
 # V5.10 UI PERFORMANCE OPTIMIZATION: read-path only; trading logic unchanged.
-PLATFORM_VERSION = "V5.11-RUNTIME-UI-HEALTH"
+PLATFORM_VERSION = "V5.13-COMPACT-PRO-UI"
 PAPER_ONLY = True
 REAL_EXECUTION_ENABLED = False
 METALS_SCAN_SECONDS = 300
@@ -142,178 +142,28 @@ def render_html(value: str) -> None:
 # ============================================================
 
 def inject_v5_css() -> None:
-    render_html(
-        """
-        <style>
-        :root {
-            --bg0:#05080c;
-            --bg1:#080d12;
-            --bg2:#0b1118;
-            --line:#202b35;
-            --line2:#2b3946;
-            --text:#d8e0e7;
-            --muted:#71808e;
-            --green:#4bd69e;
-            --red:#ef7984;
-            --amber:#e5b84f;
-            --blue:#79a9ff;
-        }
-
-        html, body, [class*="css"] {
-            font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        }
-
-        .stApp {
-            background:
-                radial-gradient(circle at 50% -10%, rgba(46,76,107,.12), transparent 27%),
-                var(--bg0);
-            color:var(--text);
-        }
-
-        .block-container {
-            max-width: 1900px;
-            padding-top:.55rem;
-            padding-bottom:2.5rem;
-            padding-left:.8rem;
-            padding-right:.8rem;
-        }
-
-        #MainMenu, footer {visibility:hidden;}
-
-        ::-webkit-scrollbar {width:7px;height:7px;}
-        ::-webkit-scrollbar-track {background:#070b10;}
-        ::-webkit-scrollbar-thumb {background:#283642;border-radius:10px;}
-
-        .q-header {
-            border:1px solid var(--line2);
-            background:linear-gradient(180deg,#10171f,#080c11);
-            padding:10px 13px;
-            margin-bottom:6px;
-            box-shadow:0 9px 28px rgba(0,0,0,.28);
-        }
-
-        .q-header-row {display:flex;justify-content:space-between;align-items:center;gap:12px;}
-        .q-brand {display:flex;align-items:center;gap:10px;}
-        .q-mark {width:17px;height:17px;background:var(--amber);box-shadow:0 0 16px rgba(229,184,79,.24);}
-        .q-title {font-size:14px;font-weight:850;letter-spacing:1.5px;color:#eef3f7;}
-        .q-sub {font-size:7.5px;letter-spacing:1.25px;color:#687887;margin-top:2px;}
-        .q-status {text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
-        .q-online {color:var(--green);font-size:9px;font-weight:800;}
-        .q-clock {color:#8d9ba7;font-size:8px;margin-top:2px;}
-
-        .q-strip {
-            border:1px solid #1b252e;
-            background:#070b10;
-            padding:6px 9px;
-            margin-bottom:7px;
-            overflow-x:auto;
-            white-space:nowrap;
-            font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-            font-size:8px;
-            letter-spacing:.35px;
-            color:#85939f;
-        }
-        .q-strip span {margin-right:18px;}
-        .pos {color:var(--green)!important;}
-        .neg {color:var(--red)!important;}
-        .warn {color:var(--amber)!important;}
-        .info {color:var(--blue)!important;}
-
-        .section-title {
-            margin:10px 0 5px 1px;
-            color:#81909d;
-            font-size:8px;
-            letter-spacing:1.2px;
-            text-transform:uppercase;
-            font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-            font-weight:800;
-        }
-
-        .panel {
-            border:1px solid var(--line);
-            background:linear-gradient(180deg,#0b1117,#070b10);
-            padding:10px;
-            min-height:84px;
-        }
-        .panel-title {
-            color:#7b8a98;
-            font-size:7.5px;
-            letter-spacing:1px;
-            text-transform:uppercase;
-            font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-            margin-bottom:7px;
-        }
-
-        .kpi {
-            border:1px solid var(--line);
-            background:#080d12;
-            padding:8px 9px;
-            min-height:68px;
-        }
-        .kpi-label {
-            color:#697987;
-            font-size:7px;
-            letter-spacing:.9px;
-            text-transform:uppercase;
-            font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-        }
-        .kpi-value {
-            color:#e9eef2;
-            font-size:17px;
-            font-weight:850;
-            margin-top:4px;
-            font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-        }
-        .kpi-sub {color:#62717d;font-size:7.5px;margin-top:2px;}
-
-        .badge {
-            display:inline-block;
-            padding:3px 6px;
-            margin:0 4px 4px 0;
-            border:1px solid #2a3742;
-            background:#0a1015;
-            color:#8f9ca7;
-            font-size:7.5px;
-            font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-        }
-        .badge-green {color:var(--green);border-color:#285d4a;background:rgba(45,119,91,.10);}
-        .badge-red {color:var(--red);border-color:#693a41;background:rgba(132,55,65,.10);}
-        .badge-amber {color:var(--amber);border-color:#6c5728;background:rgba(140,105,27,.09);}
-        .badge-blue {color:var(--blue);border-color:#365070;background:rgba(53,86,128,.10);}
-
-        div[data-testid="stMetric"] {
-            border:1px solid var(--line);
-            background:#080d12;
-            padding:8px 10px;
-            border-radius:0;
-        }
-        div[data-testid="stMetricLabel"] {color:#71818f;font-size:9px;}
-        div[data-testid="stMetricValue"] {font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
-        div[data-testid="stDataFrame"] {border:1px solid var(--line);}
-        div[data-baseweb="select"] > div {background:#080d12;border-color:#24313b;}
-
-        .stButton > button {
-            width:100%;
-            min-height:33px;
-            border-radius:0;
-            border:1px solid #293742;
-            background:linear-gradient(180deg,#111922,#0a1016);
-            color:#cbd4db;
-            font-size:9px;
-        }
-        .stButton > button:hover {border-color:#4a6277;color:white;}
-        div[role="radiogroup"] {background:#070b10;border:1px solid #1e2932;padding:3px 6px;border-radius:0;}
-
-        @media (max-width:1050px) {
-            .block-container {padding-left:.45rem;padding-right:.45rem;}
-            .q-title {font-size:12px;}
-            .q-sub {display:none;}
-            .kpi-value {font-size:13px;}
-            .q-strip {font-size:7px;}
-        }
-        </style>
-        """
-    )
+    """Compact professional UI skin. Presentation-only; trading logic unchanged."""
+    render_html("""
+    <style>
+    :root{--bg0:#05080c;--line:#1d2933;--line2:#2b3a46;--text:#e7edf2;--green:#43d59d;--red:#ef6f7d;--amber:#e6b84d;--blue:#72a7ff;}
+    html,body,[class*="css"]{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
+    .stApp{background:radial-gradient(circle at 50% -12%,rgba(54,88,122,.14),transparent 26%),var(--bg0);color:var(--text);}
+    .block-container{max-width:1920px;padding-top:.35rem;padding-bottom:2rem;padding-left:.55rem;padding-right:.55rem;}
+    #MainMenu,footer{visibility:hidden;}::-webkit-scrollbar{width:6px;height:6px;}::-webkit-scrollbar-track{background:#070b10;}::-webkit-scrollbar-thumb{background:#283744;border-radius:10px;}
+    .q-header{border:1px solid var(--line2);background:linear-gradient(180deg,#0d151d,#080c11);padding:8px 11px;margin-bottom:4px;box-shadow:0 8px 24px rgba(0,0,0,.28);}
+    .q-header-row{display:flex;justify-content:space-between;align-items:center;gap:10px}.q-brand{display:flex;align-items:center;gap:9px}.q-mark{width:14px;height:14px;background:var(--amber);box-shadow:0 0 14px rgba(229,184,79,.24)}
+    .q-title{font-size:12.5px;font-weight:850;letter-spacing:1.3px;color:#f0f4f7}.q-sub{font-size:6.8px;letter-spacing:1.05px;color:#687887;margin-top:2px}.q-status{text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.q-online{color:var(--green);font-size:8px;font-weight:800}.q-clock{color:#8d9ba7;font-size:7px;margin-top:1px}
+    .q-strip{border:1px solid #18232c;background:#070b10;padding:4px 8px;margin-bottom:5px;overflow-x:auto;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:7.2px;letter-spacing:.25px;color:#85939f}.q-strip span{margin-right:15px}.pos{color:var(--green)!important}.neg{color:var(--red)!important}.warn{color:var(--amber)!important}.info{color:var(--blue)!important}
+    .section-title{margin:7px 0 4px 1px;color:#7f8f9c;font-size:7px;letter-spacing:1.05px;text-transform:uppercase;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:800}
+    .panel{border:1px solid var(--line);background:linear-gradient(180deg,#0b1218,#070b10);padding:8px;min-height:70px}.panel-title{color:#7a8a98;font-size:6.7px;letter-spacing:.9px;text-transform:uppercase;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-bottom:5px}
+    .kpi{border:1px solid var(--line);background:#080d12;padding:6px 8px;min-height:57px}.kpi-label{color:#697987;font-size:6.2px;letter-spacing:.8px;text-transform:uppercase;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.kpi-value{color:#edf2f5;font-size:14px;font-weight:850;margin-top:3px;line-height:1.05;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.kpi-sub{color:#62717d;font-size:6.5px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .badge{display:inline-block;padding:2px 5px;margin:0 3px 3px 0;border:1px solid #2a3742;background:#0a1015;color:#8f9ca7;font-size:6.7px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.badge-green{color:var(--green);border-color:#285d4a}.badge-red{color:var(--red);border-color:#693a41}.badge-amber{color:var(--amber);border-color:#6c5728}.badge-blue{color:var(--blue);border-color:#365070}
+    div[data-testid="stMetric"]{border:1px solid var(--line);background:#080d12;padding:6px 8px;border-radius:0}div[data-testid="stMetricLabel"]{color:#71818f;font-size:8px}div[data-testid="stMetricValue"]{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:1rem}div[data-testid="stDataFrame"]{border:1px solid var(--line)}div[data-baseweb="select"]>div{background:#080d12;border-color:#24313b;min-height:30px}
+    .stButton>button{width:100%;min-height:30px;border-radius:0;border:1px solid #293742;background:linear-gradient(180deg,#111922,#0a1016);color:#cbd4db;font-size:8px;padding:.25rem .45rem}.stButton>button:hover{border-color:#4a6277;color:white}div[role="radiogroup"]{background:#070b10;border:1px solid #1e2932;padding:2px 5px;border-radius:0}div[role="radiogroup"] label{font-size:8px!important}
+    .compact-title{font-size:8px;color:#8b99a5;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px;font-weight:800}.activity-row{display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid #17222b;padding:5px 0;font-size:7.5px;color:#a7b3bd}.activity-row:last-child{border-bottom:none}.activity-time{color:#647581;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.signal-buy{color:var(--green);font-weight:800}.signal-sell{color:var(--red);font-weight:800}.signal-flat{color:#8b98a3;font-weight:800}
+    @media(max-width:1050px){.block-container{padding-left:.35rem;padding-right:.35rem}.q-title{font-size:11px}.q-sub{display:none}.kpi-value{font-size:12px}.q-strip{font-size:6.6px}}
+    </style>
+    """)
 
 inject_v5_css()
 
@@ -1238,20 +1088,15 @@ def build_position_rows(
 
 @st.fragment(run_every=f"{UI_REFRESH_SECONDS}s")
 def live_terminal() -> None:
+    """V5.13 compact professional dashboard. UI-only refactor."""
     trader = st.session_state.paper_trader
     st.session_state.bot_error = None
     publish_web_heartbeat()
 
-    # V5.10 UI performance path:
-    # Read PostgreSQL once per data class and reuse the snapshot throughout this
-    # fragment. Trading/runtime logic remains fully independent of this UI path.
     balance = safe_float(trader.get_balance())
     positions = trader.get_positions()
     history = trader.get_trade_history()
     update_daily_risk(balance)
-
-    # UI reads the latest PostgreSQL runtime snapshot only.
-    # It never runs scanner / strategy / execution work on rerender.
     sync_crypto_runtime_snapshot()
 
     position_by_slot = {
@@ -1263,224 +1108,138 @@ def live_terminal() -> None:
     metals_position = position_by_slot.get(METALS_SLOT)
     total_pnl = sum(safe_float(trade.get("pnl")) for trade in history)
     drawdown = safe_float(st.session_state.current_drawdown)
-    portfolio = {
-        "balance": balance,
-        "open_positions": positions,
-        "open_position_count": len(positions),
-        "crypto_position": crypto_position,
-        "metals_position": metals_position,
-        "crypto_slot_available": crypto_position is None,
-        "metals_slot_available": metals_position is None,
-        "max_total_positions": 2,
-        "real_orders_enabled": False,
-    }
+    open_count = len(positions)
 
-    render_section("Portfolio Command / Risk / Model State")
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1, k2, k3, k4, k5 = st.columns([1.15, 1, 1, 1, .8])
     with k1:
-        render_kpi("Paper Equity", f"${balance:,.2f}", "Live paper portfolio")
+        render_kpi("Total Balance", f"${balance:,.2f}", f"PnL {total_pnl:+,.2f}")
     with k2:
-        render_kpi("Realized PnL", f"${total_pnl:+,.2f}", f"{len(history)} closed trades")
+        render_kpi("Open Positions", open_count, "Crypto + Metals")
     with k3:
-        render_kpi("Daily Drawdown", f"{drawdown:.2f}%", f"Limit {MAX_DAILY_LOSS_PCT:.2f}%")
+        risk_used = max(0.0, drawdown)
+        render_kpi("Risk Used", f"{risk_used:.2f}%", f"Limit {MAX_DAILY_LOSS_PCT:.2f}%")
     with k4:
-        render_kpi("Crypto Score", f"{safe_float(st.session_state.crypto_score):+.1f}", st.session_state.crypto_signal)
+        render_kpi("Markets Scanned", len(st.session_state.crypto_scanner_results), f"Universe {len(SCAN_MARKETS)}")
     with k5:
-        render_kpi("MTF Confidence", f"{safe_float(st.session_state.crypto_confidence):.1f}%", st.session_state.crypto_market)
-    with k6:
-        render_kpi("Open Slots", f"{portfolio.get('open_position_count',0)}/2", "1 Crypto + 1 Metal")
+        render_kpi("AI Signal", st.session_state.crypto_signal, f"{safe_float(st.session_state.crypto_confidence):.1f}%")
 
     if selected_page == "Command":
-        render_section("Quant Command Matrix")
-        left, right = st.columns([1.65, 1])
+        render_section("Compact Professional Command")
+        left, center, right = st.columns([1.75, .85, .8])
 
         with left:
-            row1, row2 = st.columns([2, 1])
+            row1, row2 = st.columns([1.55, .9])
             with row1:
                 chart_symbol = st.selectbox("Primary Market", SCAN_MARKETS, key="chart_pair", label_visibility="collapsed")
             with row2:
-                try:
-                    ticker = get_cached_ticker(
-                        chart_symbol
-                    )
-                    if ticker:
-                        st.caption(
-                            f"{chart_symbol}  ${safe_float(ticker.get('last')):,.4f}  "
-                            f"{safe_float(ticker.get('change_pct')):+.2f}%"
-                        )
-                except Exception:
+                ticker = get_cached_ticker(chart_symbol)
+                if ticker:
+                    change = safe_float(ticker.get("change_pct"))
+                    st.caption(f"{chart_symbol}  ${safe_float(ticker.get('last')):,.4f}  {change:+.2f}%")
+                else:
                     st.caption(chart_symbol)
             render_quant_chart(chart_symbol)
 
-        with right:
-            analytic_symbol = (
-                st.session_state.crypto_market
-                if st.session_state.crypto_market not in ("", "—")
-                else st.session_state.get("chart_pair", "BTCUSDT")
-            )
-            regime = get_regime_data(analytic_symbol)
-            intelligence = scanner_intelligence(st.session_state.crypto_scanner_results)
-            breadth = intelligence.get("breadth", {}) if isinstance(intelligence, dict) else {}
-
-            a1, a2 = st.columns(2)
-            with a1:
-                render_kpi("Regime", regime.get("regime", "UNKNOWN"), regime.get("trend", "UNKNOWN"))
-            with a2:
-                render_kpi("ATR", f"{safe_float(regime.get('atr_pct')):.2f}%", "15m volatility")
-            a3, a4 = st.columns(2)
-            with a3:
-                render_kpi("Momentum", f"{safe_float(regime.get('momentum')):+.2f}", "Directional impulse")
-            with a4:
-                render_kpi(
-                    "Breadth",
-                    f"{safe_float(breadth.get('bullish_pct')):.0f}/{safe_float(breadth.get('bearish_pct')):.0f}",
-                    "Bull / Bear %",
-                )
-
-            reason = escape(st.session_state.crypto_reason or "Awaiting current scanner decision.")
-            render_html(
-                f"""
-                <div class="panel" style="margin-top:8px;">
-                    <div class="panel-title">CRYPTO DECISION CORE</div>
-                    {badge(st.session_state.crypto_status)}
-                    {badge(st.session_state.crypto_signal)}
-                    <div style="margin-top:8px;color:#8a98a5;font-size:9px;line-height:1.55;">{reason}</div>
-                </div>
-                """
-            )
-
-        render_section("Engine Flow / Position State")
-        e1, e2, e3 = st.columns([1, 1, 1.15])
-        with e1:
-            render_html(
-                f"""
-                <div class="panel">
-                  <div class="panel-title">CRYPTO ENGINE</div>
-                  {badge(st.session_state.crypto_status)}<br><br>
-                  <b>{escape(st.session_state.crypto_market)}</b>
-                  <div style="color:#71808d;font-size:8px;margin-top:6px;">
-                  Score {safe_float(st.session_state.crypto_score):+.1f} · MTF {safe_float(st.session_state.crypto_confidence):.1f}%
-                  </div>
-                </div>
-                """
-            )
-        with e2:
-            best = st.session_state.metals_best_setup or {}
-            render_html(
-                f"""
-                <div class="panel">
-                  <div class="panel-title">METALS ENGINE</div>
-                  {badge(st.session_state.metals_status)}<br><br>
-                  <b>{escape(best.get('symbol','XAU / XAG'))}</b>
-                  <div style="color:#71808d;font-size:8px;margin-top:6px;">
-                  Signal {escape(best.get('signal','NO TRADE'))} · MTF {safe_float(best.get('mtf_confidence')):.1f}%
-                  </div>
-                </div>
-                """
-            )
-        with e3:
-            health = safe_system_health()
-            overall = health.get("overall_status", "UNKNOWN")
-            render_html(
-                f"""
-                <div class="panel">
-                  <div class="panel-title">SYSTEM HEALTH GATE</div>
-                  {badge(overall)} {badge('PAPER LOCKED')}
-                  <div style="margin-top:8px;color:#71808d;font-size:8px;">
-                  Runtime, DB and bootstrap observability are isolated from execution safety.
-                  </div>
-                </div>
-                """
-            )
-
-        render_section("Signal Matrix")
-        results = st.session_state.crypto_scanner_results
-        if results:
-            rows = [
-                {
-                    "Market": item.get("symbol"),
-                    "Signal": item.get("signal"),
-                    "Score": item.get("score"),
-                    "Reason": item.get("reason"),
-                }
-                for item in results
-            ]
-            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, height=275)
-        else:
-            runtime_status = str(st.session_state.crypto_status or "STARTING")
-            if runtime_status not in {"STARTING", "WARMING", ""}:
-                st.info(
-                    f"Signal matrix has no cached rows yet · runtime={runtime_status}. "
-                    "Autonomous trading is not blocked by this display state."
-                )
+        with center:
+            render_html('<div class="compact-title">Recent Activity</div>')
+            recent = list(history[-5:]) if history else []
+            if recent:
+                activity = []
+                for trade in reversed(recent):
+                    symbol = escape(trade.get("symbol", "—"))
+                    reason = escape(trade.get("reason", "CLOSED"))
+                    pnl = safe_float(trade.get("pnl"))
+                    cls = "signal-buy" if pnl >= 0 else "signal-sell"
+                    activity.append(f'<div class="activity-row"><span>{symbol}<br><span class="{cls}">{pnl:+.2f}</span></span><span class="activity-time">{reason}</span></div>')
+                render_html('<div class="panel">' + ''.join(activity) + '</div>')
             else:
-                st.info("Signal matrix warming up.")
+                render_html('<div class="panel">No closed activity yet.</div>')
+
+            render_html('<div class="compact-title" style="margin-top:7px;">Decision Core</div>')
+            reason = escape(st.session_state.crypto_reason or "Awaiting current scanner decision.")
+            render_html(f"""<div class="panel">{badge(st.session_state.crypto_status)} {badge(st.session_state.crypto_signal)}<div style="margin-top:6px;font-size:8px;color:#8c99a4;line-height:1.45;">{reason}</div></div>""")
+
+        with right:
+            render_html('<div class="compact-title">Active Positions</div>')
+            if positions:
+                pos_rows = []
+                for p in positions:
+                    sym = escape(p.get("symbol", "—"))
+                    side = escape(p.get("side", "—"))
+                    side_cls = "signal-buy" if str(side).upper() == "LONG" else "signal-sell"
+                    pos_rows.append(f'<div class="activity-row"><span>{sym}<br><span class="{side_cls}">{side}</span></span><span class="activity-time">OPEN</span></div>')
+                render_html('<div class="panel">' + ''.join(pos_rows) + '</div>')
+            else:
+                render_html('<div class="panel">Portfolio flat.</div>')
+
+            render_html('<div class="compact-title" style="margin-top:7px;">Risk Overview</div>')
+            remaining = max(0.0, MAX_DAILY_LOSS_PCT - drawdown)
+            render_html(f"""<div class="panel"><div class="activity-row"><span>Daily Drawdown</span><span>{drawdown:.2f}%</span></div><div class="activity-row"><span>Loss Budget Left</span><span>{remaining:.2f}%</span></div><div class="activity-row"><span>Open Slots</span><span>{open_count}/2</span></div><div class="activity-row"><span>Execution</span><span class="signal-flat">PAPER</span></div></div>""")
+
+        render_section("Scanner Signals / Portfolio Allocation / Performance")
+        scan_col, alloc_col, perf_col = st.columns([1.5, .75, .75])
+        with scan_col:
+            results = st.session_state.crypto_scanner_results
+            if results:
+                sig_rows = []
+                for item in results:
+                    signal = str(item.get("signal", "NO TRADE"))
+                    if signal == "NO TRADE":
+                        continue
+                    sig_rows.append({"Symbol": item.get("symbol"), "Signal": signal, "Score": item.get("score"), "Price": item.get("price"), "Action": "CANDIDATE"})
+                if sig_rows:
+                    st.dataframe(pd.DataFrame(sig_rows[:10]), width="stretch", hide_index=True, height=245)
+                else:
+                    st.info("No active scanner signals. Quality filters are holding.")
+            else:
+                st.info("Scanner state warming.")
+
+        with alloc_col:
+            crypto_count = 1 if crypto_position else 0
+            metal_count = 1 if metals_position else 0
+            render_html(f"""<div class="panel" style="min-height:245px;"><div class="panel-title">PORTFOLIO ALLOCATION</div><div class="activity-row"><span>Crypto Slot</span><span>{'OPEN' if crypto_count else 'FREE'}</span></div><div class="activity-row"><span>Metals Slot</span><span>{'OPEN' if metal_count else 'FREE'}</span></div><div class="activity-row"><span>Paper Equity</span><span>${balance:,.0f}</span></div><div class="activity-row"><span>Realized PnL</span><span>{total_pnl:+,.0f}</span></div><div style="margin-top:18px;color:#687987;font-size:8px;line-height:1.45;">Two isolated asset-class slots. Real execution remains hard-disabled.</div></div>""")
+
+        with perf_col:
+            wins = sum(1 for t in history if safe_float(t.get("pnl")) > 0)
+            losses = sum(1 for t in history if safe_float(t.get("pnl")) < 0)
+            closed = len(history)
+            win_rate = (wins / closed * 100.0) if closed else 0.0
+            render_html(f"""<div class="panel" style="min-height:245px;"><div class="panel-title">PERFORMANCE</div><div class="activity-row"><span>Closed Trades</span><span>{closed}</span></div><div class="activity-row"><span>Wins / Losses</span><span>{wins} / {losses}</span></div><div class="activity-row"><span>Win Rate</span><span>{win_rate:.1f}%</span></div><div class="activity-row"><span>Realized PnL</span><span>{total_pnl:+,.2f}</span></div><div class="activity-row"><span>Daily DD</span><span>{drawdown:.2f}%</span></div></div>""")
 
     elif selected_page == "Crypto":
         render_section("Crypto Intelligence")
-        analytics_symbol = (
-            crypto_position.get("symbol")
-            if crypto_position
-            else (
-                st.session_state.crypto_market
-                if st.session_state.crypto_market not in ("", "—")
-                else st.session_state.get("chart_pair", "BTCUSDT")
-            )
-        )
+        analytics_symbol = crypto_position.get("symbol") if crypto_position else (st.session_state.crypto_market if st.session_state.crypto_market not in ("", "—") else st.session_state.get("chart_pair", "BTCUSDT"))
         regime = get_regime_data(analytics_symbol)
         intelligence = scanner_intelligence(st.session_state.crypto_scanner_results)
         breadth = intelligence.get("breadth", {}) if isinstance(intelligence, dict) else {}
-
         m1, m2, m3, m4, m5, m6 = st.columns(6)
-        with m1:
-            render_kpi("Market", analytics_symbol, "Primary scanner asset")
-        with m2:
-            render_kpi("Regime", regime.get("regime", "UNKNOWN"), regime.get("trend", "UNKNOWN"))
-        with m3:
-            render_kpi("ATR", f"{safe_float(regime.get('atr_pct')):.2f}%", "Volatility")
-        with m4:
-            render_kpi("Momentum", f"{safe_float(regime.get('momentum')):+.2f}", "Impulse")
-        with m5:
-            render_kpi("Bull Breadth", f"{safe_float(breadth.get('bullish_pct')):.1f}%", "Scanner")
-        with m6:
-            render_kpi("Bear Breadth", f"{safe_float(breadth.get('bearish_pct')):.1f}%", "Scanner")
-
-        chart_col, model_col = st.columns([1.7, 1])
+        with m1: render_kpi("Market", analytics_symbol, "Primary scanner asset")
+        with m2: render_kpi("Regime", regime.get("regime", "UNKNOWN"), regime.get("trend", "UNKNOWN"))
+        with m3: render_kpi("ATR", f"{safe_float(regime.get('atr_pct')):.2f}%", "Volatility")
+        with m4: render_kpi("Momentum", f"{safe_float(regime.get('momentum')):+.2f}", "Impulse")
+        with m5: render_kpi("Bull Breadth", f"{safe_float(breadth.get('bullish_pct')):.1f}%", "Scanner")
+        with m6: render_kpi("Bear Breadth", f"{safe_float(breadth.get('bearish_pct')):.1f}%", "Scanner")
+        chart_col, model_col = st.columns([2.15, .85])
         with chart_col:
             render_quant_chart(analytics_symbol)
         with model_col:
             render_kpi("AI Score", f"{safe_float(st.session_state.crypto_score):+.1f}", st.session_state.crypto_signal)
             st.markdown("<br>", unsafe_allow_html=True)
-            render_kpi("MTF Confidence", f"{safe_float(st.session_state.crypto_confidence):.1f}%", st.session_state.crypto_status)
-
+            confidence = safe_float(st.session_state.crypto_confidence)
+            render_kpi("MTF Confidence", f"{confidence:.1f}%" if confidence > 0 else "—", st.session_state.crypto_status)
         render_section("Crypto Scanner")
         if st.session_state.crypto_scanner_results:
-            st.dataframe(pd.DataFrame(st.session_state.crypto_scanner_results), width="stretch", hide_index=True)
+            st.dataframe(pd.DataFrame(st.session_state.crypto_scanner_results), width="stretch", hide_index=True, height=320)
         else:
             runtime_status = str(st.session_state.crypto_status or "STARTING")
-            if runtime_status not in {"STARTING", "WARMING", ""}:
-                st.info(
-                    f"Crypto scanner runtime: {runtime_status}. "
-                    "No cached scanner rows are available yet; trading runtime remains independent of this UI table."
-                )
-            else:
-                st.info("Crypto scanner is warming.")
-
-        render_section("Correlation Matrix")
-        show_correlation = st.toggle(
-            "Load correlation matrix",
-            value=False,
-            key="show_crypto_correlation",
-            help="Loads 11-market candle correlation only when you need it. This keeps the main Crypto UI fast.",
-        )
+            st.info(f"Crypto scanner runtime: {runtime_status}." if runtime_status not in {"STARTING", "WARMING", ""} else "Crypto scanner is warming.")
+        show_correlation = st.toggle("Load correlation matrix", value=False, key="show_crypto_correlation", help="On-demand only, to keep the terminal responsive.")
         if show_correlation:
             corr = build_crypto_correlation()
             if corr is not None and not corr.empty:
                 st.dataframe(corr.round(2), width="stretch")
             else:
                 st.info("Correlation data is building.")
-        else:
-            st.caption("Correlation is on-demand to keep the terminal responsive.")
 
     elif selected_page == "Metals":
         render_section("Precious Metals Intelligence")
@@ -1488,23 +1247,10 @@ def live_terminal() -> None:
         render_section("Gold / Silver MTF Signal Grid")
         results = st.session_state.metals_scanner_results
         if results:
-            rows = [
-                {
-                    "Market": item.get("symbol"),
-                    "Signal": item.get("signal"),
-                    "Score": item.get("score"),
-                    "MTF %": item.get("mtf_confidence"),
-                    "1H + 4H": item.get("higher_tf_confirmed"),
-                    "Approved": item.get("approved"),
-                    "Entry": item.get("entry_price"),
-                    "Reason": item.get("reason"),
-                }
-                for item in results
-            ]
+            rows = [{"Market": item.get("symbol"), "Signal": item.get("signal"), "Score": item.get("score"), "MTF %": item.get("mtf_confidence"), "1H + 4H": item.get("higher_tf_confirmed"), "Approved": item.get("approved"), "Entry": item.get("entry_price"), "Reason": item.get("reason")} for item in results]
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
         else:
             st.info("Metals scanner warming.")
-
         if st.session_state.metals_best_setup:
             with st.expander("Metals Model Diagnostics"):
                 st.json(st.session_state.metals_best_setup)
@@ -1519,11 +1265,11 @@ def live_terminal() -> None:
 
     elif selected_page == "Scanner":
         render_section("Multi-Asset Scanner")
-        crypto_col, metal_col = st.columns([1.6, 1])
+        crypto_col, metal_col = st.columns([1.75, 1])
         with crypto_col:
             st.markdown("#### Crypto")
             if st.session_state.crypto_scanner_results:
-                st.dataframe(pd.DataFrame(st.session_state.crypto_scanner_results), width="stretch", hide_index=True)
+                st.dataframe(pd.DataFrame(st.session_state.crypto_scanner_results), width="stretch", hide_index=True, height=420)
             else:
                 st.info("Crypto scanner warming.")
         with metal_col:
@@ -1538,18 +1284,10 @@ def live_terminal() -> None:
         start_balance = safe_float(st.session_state.day_start_balance, PAPER_BALANCE)
         remaining_loss_budget = max(0.0, MAX_DAILY_LOSS_PCT - drawdown)
         r1, r2, r3, r4 = st.columns(4)
-        with r1:
-            render_kpi("Day Start Equity", f"${start_balance:,.2f}", "UTC session anchor")
-        with r2:
-            render_kpi("Current Equity", f"${balance:,.2f}", "Paper portfolio")
-        with r3:
-            render_kpi("Drawdown", f"{drawdown:.2f}%", f"Max {MAX_DAILY_LOSS_PCT:.2f}%")
-        with r4:
-            render_kpi(
-                "Loss Budget Left",
-                f"{remaining_loss_budget:.2f}%",
-                "BLOCKED" if st.session_state.trading_paused_by_risk else "AVAILABLE",
-            )
+        with r1: render_kpi("Day Start Equity", f"${start_balance:,.2f}", "UTC session anchor")
+        with r2: render_kpi("Current Equity", f"${balance:,.2f}", "Paper portfolio")
+        with r3: render_kpi("Drawdown", f"{drawdown:.2f}%", f"Max {MAX_DAILY_LOSS_PCT:.2f}%")
+        with r4: render_kpi("Loss Budget Left", f"{remaining_loss_budget:.2f}%", "BLOCKED" if st.session_state.trading_paused_by_risk else "AVAILABLE")
         st.markdown("<br>", unsafe_allow_html=True)
         st.json(safe_system_health(), expanded=False)
 
@@ -1557,21 +1295,12 @@ def live_terminal() -> None:
         render_section("Performance Analytics")
         statistics = trade_statistics(history)
         st.json(statistics, expanded=False)
-        crypto_history = [
-            trade for trade in history
-            if str(trade.get("asset_class", "")).upper() == "CRYPTO"
-        ]
-        metal_history = [
-            trade for trade in history
-            if str(trade.get("asset_class", "")).upper() == "METAL"
-        ]
+        crypto_history = [t for t in history if str(t.get("asset_class", "")).upper() == "CRYPTO"]
+        metal_history = [t for t in history if str(t.get("asset_class", "")).upper() == "METAL"]
         a1, a2, a3 = st.columns(3)
-        with a1:
-            render_kpi("Crypto Trades", len(crypto_history), "Closed")
-        with a2:
-            render_kpi("Metals Trades", len(metal_history), "Closed")
-        with a3:
-            render_kpi("Total Trades", len(history), "All assets")
+        with a1: render_kpi("Crypto Trades", len(crypto_history), "Closed")
+        with a2: render_kpi("Metals Trades", len(metal_history), "Closed")
+        with a3: render_kpi("Total Trades", len(history), "All assets")
         if history:
             st.dataframe(pd.DataFrame(history), width="stretch", hide_index=True)
 
