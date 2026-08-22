@@ -124,6 +124,14 @@ CANDLE_LIMIT = int(
 # CORE MARKETS
 # ============================================================
 
+# V5.12 canonical crypto scan universe.
+#
+# Design goals:
+# - Expand opportunity coverage from 11 to 30 liquid, established markets.
+# - Keep the current Coinbase USD market-data path and V5 strategy/risk/lifecycle
+#   architecture unchanged.
+# - Exclude stablecoins, wrapped duplicates, and very small/illiquid assets.
+# - A market-data failure for any individual symbol remains isolated by scanner.py.
 SCAN_MARKETS = [
     "BTCUSDT",
     "ETHUSDT",
@@ -136,6 +144,25 @@ SCAN_MARKETS = [
     "DOTUSDT",
     "NEARUSDT",
     "SUIUSDT",
+    "LTCUSDT",
+    "BCHUSDT",
+    "UNIUSDT",
+    "AAVEUSDT",
+    "ATOMUSDT",
+    "FILUSDT",
+    "ICPUSDT",
+    "ETCUSDT",
+    "XLMUSDT",
+    "HBARUSDT",
+    "ALGOUSDT",
+    "APTUSDT",
+    "ARBUSDT",
+    "OPUSDT",
+    "INJUSDT",
+    "SEIUSDT",
+    "SHIBUSDT",
+    "PEPEUSDT",
+    "BONKUSDT",
 ]
 
 
