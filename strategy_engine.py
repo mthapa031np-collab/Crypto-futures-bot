@@ -1954,6 +1954,68 @@ def analyse_multi_timeframe(
         candidate_signal
         == "NO TRADE"
     ):
+        long_15m_pass = (
+            score15 >= 2.25
+        )
+        long_1h_pass = (
+            score1h >= 1.75
+        )
+        short_15m_pass = (
+            score15 <= -2.25
+        )
+        short_1h_pass = (
+            score1h <= -1.75
+        )
+
+        if (
+            score15 < 0
+            or score1h < 0
+        ):
+            diagnostic_bias = "SELL"
+            threshold_text = (
+                "required 15m<=-2.25, 1h<=-1.75"
+            )
+            pass_text = (
+                f"15m_pass={short_15m_pass}, "
+                f"1h_pass={short_1h_pass}"
+            )
+        elif (
+            score15 > 0
+            or score1h > 0
+        ):
+            diagnostic_bias = "BUY"
+            threshold_text = (
+                "required 15m>=2.25, 1h>=1.75"
+            )
+            pass_text = (
+                f"15m_pass={long_15m_pass}, "
+                f"1h_pass={long_1h_pass}"
+            )
+        else:
+            diagnostic_bias = "NEUTRAL"
+            threshold_text = (
+                "required BUY 15m>=2.25/1h>=1.75 "
+                "or SELL 15m<=-2.25/1h<=-1.75"
+            )
+            pass_text = (
+                "15m_pass=False, 1h_pass=False"
+            )
+
+        diagnostic_reason = (
+            f"{diagnostic_bias} directional confirmation rejected | "
+            f"15m={score15:.2f} | "
+            f"1h={score1h:.2f} | "
+            f"4h={score4h:.2f} | "
+            f"{threshold_text} | "
+            f"{pass_text}"
+        )
+
+        print(
+            "[V5.14 DIRECTION DIAGNOSTIC] "
+            f"{symbol} | "
+            f"{diagnostic_reason}",
+            flush=True,
+        )
 
         return {
             "symbol":
@@ -1969,10 +2031,50 @@ def analyse_multi_timeframe(
                 0.0,
 
             "reason":
-                (
-                    "15m + 1h directional "
-                    "threshold not satisfied."
-                ),
+                diagnostic_reason,
+
+            "diagnostics":
+                {
+                    "diagnostic_version":
+                        "V5.14_DIRECTION_DIAGNOSTICS",
+
+                    "bias":
+                        diagnostic_bias,
+
+                    "scores":
+                        {
+                            "15m":
+                                score15,
+                            "1h":
+                                score1h,
+                            "4h":
+                                score4h,
+                        },
+
+                    "thresholds":
+                        {
+                            "buy_15m":
+                                2.25,
+                            "buy_1h":
+                                1.75,
+                            "sell_15m":
+                                -2.25,
+                            "sell_1h":
+                                -1.75,
+                        },
+
+                    "passes":
+                        {
+                            "buy_15m":
+                                long_15m_pass,
+                            "buy_1h":
+                                long_1h_pass,
+                            "sell_15m":
+                                short_15m_pass,
+                            "sell_1h":
+                                short_1h_pass,
+                        },
+                },
 
             "timeframes":
                 timeframe_data,
